@@ -1,6 +1,7 @@
 # SniffNetBar
 
-Fork of Sniffnet, extended into a macOS menu bar application with passive threat visibility.
+macOS menu bar network observer with process-level visibility, geo map, passive alerts, agentic decision-making, and emerging machine learning for smarter threat promotion & anomaly spotting. Extended from Sniffnet.
+
 
 ## What it does
 
