@@ -1,0 +1,21 @@
+// public_suffix_list.dat (trimmed subset for SniffNetBar)
+// Source: publicsuffix.org (trimmed to common entries)
+com
+org
+net
+edu
+gov
+co.uk
+org.uk
+ac.uk
+com.au
+net.au
+org.au
+co.jp
+ne.jp
+or.jp
+co.nz
+org.nz
+com.br
+com.mx
+com.sg

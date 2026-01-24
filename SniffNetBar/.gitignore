@@ -1,0 +1,9 @@
+build/
+*.o
+*.dSYM/
+.DS_Store
+*.swp
+*~
+documentation/
+docs/
+SniffNetBar/Makefile.local

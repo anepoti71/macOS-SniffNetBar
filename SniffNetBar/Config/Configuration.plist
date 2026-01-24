@@ -1,0 +1,161 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Logging Configuration -->
+	<key>DebugLogging</key>
+	<true/>
+
+	<!-- UI Update Configuration -->
+	<key>MenuUpdateInterval</key>
+	<real>1.0</real>
+	<key>DeviceListRefreshInterval</key>
+	<real>30.0</real>
+	<key>MaxTopHostsToShow</key>
+	<integer>5</integer>
+	<key>MaxTopConnectionsToShow</key>
+	<integer>5</integer>
+	<key>MapMenuViewHeight</key>
+	<real>220.0</real>
+	<key>MenuFixedWidth</key>
+	<real>420.0</real>
+
+	<!-- Reconnection Configuration -->
+	<key>ReconnectDelay</key>
+	<real>5.0</real>
+	<key>MaxReconnectAttempts</key>
+	<integer>3</integer>
+
+	<!-- Packet Capture Configuration -->
+	<!-- Performance: 50ms polling (20 wakeups/sec) instead of 10ms (100 wakeups/sec) -->
+	<key>PacketPollingInterval</key>
+	<real>0.05</real>
+
+	<!-- Anomaly Detection Configuration -->
+	<key>AnomalyWindowSeconds</key>
+	<real>60.0</real>
+	<key>AnomalyRetrainInterval</key>
+	<real>21600.0</real>
+
+	<!-- Map Configuration -->
+	<key>GeoLocationSemaphoreLimit</key>
+	<integer>5</integer>
+	<key>IpInfoAPIToken</key>
+	<string>YOUR_IPINFO_API_TOKEN_HERE</string>
+
+	<!-- Location Cache Configuration -->
+	<key>MaxLocationCacheSize</key>
+	<integer>500</integer>
+	<key>LocationCacheExpirationTime</key>
+	<real>7200</real>
+
+	<!-- Map Configuration -->
+	<key>DefaultMapProvider</key>
+	<string>ipinfo.io</string>
+	<key>MaxConnectionLinesToShow</key>
+	<integer>10</integer>
+	<key>ConnectionLineColor</key>
+	<string>#ff7a18</string>
+	<key>ConnectionLineWeight</key>
+	<integer>3</integer>
+	<key>ConnectionLineOpacity</key>
+	<real>0.5</real>
+
+	<!-- Threat Intelligence Configuration -->
+	<key>ThreatIntelCacheSize</key>
+	<integer>1000</integer>
+	<key>ThreatIntelCacheTTL</key>
+	<real>3600.0</real>
+	<key>ThreatIntelPersistenceTTLHours</key>
+	<real>24.0</real>
+
+	<!-- About Configuration -->
+	<key>AppVersion</key>
+	<string>1.1.2</string>
+
+	<!-- Explainability Configuration -->
+	<key>ExplainabilityEnabled</key>
+	<true/>
+	<key>ExplainabilityOllamaBaseURL</key>
+	<string>http://127.0.0.1:11434</string>
+	<key>ExplainabilityOllamaModel</key>
+	<string>llama3.1</string>
+	<key>ExplainabilityOllamaTimeout</key>
+	<real>10.0</real>
+	<key>ExplainabilityMinScore</key>
+	<real>0.90</real>
+
+	<!-- Promotion Agent Configuration -->
+	<key>PromotionOllamaBaseURL</key>
+	<string>http://127.0.0.1:11434</string>
+	<key>PromotionOllamaModel</key>
+	<string>qwen2.5:7b</string>
+	<key>PromotionOllamaTimeout</key>
+	<real>30.0</real>
+
+	<!--
+	API Keys Configuration:
+	API keys are now stored securely in the macOS Keychain.
+	Use the "Configure API Keys" menu option to set them.
+	The values below are placeholders for reference only.
+	-->
+
+	<!-- VirusTotal Provider Configuration -->
+	<key>VirusTotalEnabled</key>
+	<false/>
+	<key>VirusTotalAPIURL</key>
+	<string>https://www.virustotal.com/api/v3</string>
+	<key>VirusTotalAPIKey</key>
+	<string>YOUR_API_KEY_HERE</string>
+	<key>VirusTotalTimeout</key>
+	<real>10.0</real>
+	<key>VirusTotalMaxRequestsPerMin</key>
+	<integer>4</integer>
+	<key>VirusTotalTTL</key>
+	<real>86400.0</real>
+
+	<!-- AbuseIPDB Provider Configuration -->
+	<key>AbuseIPDBEnabled</key>
+	<false/>
+	<key>AbuseIPDBAPIURL</key>
+	<string>https://api.abuseipdb.com/api/v2</string>
+	<key>AbuseIPDBAPIKey</key>
+	<string>YOUR_API_KEY_HERE</string>
+	<key>AbuseIPDBTimeout</key>
+	<real>10.0</real>
+	<key>AbuseIPDBMaxRequestsPerMin</key>
+	<integer>60</integer>
+	<key>AbuseIPDBTTL</key>
+	<real>86400.0</real>
+	<key>AbuseIPDBMaxAgeInDays</key>
+	<integer>90</integer>
+
+	<!-- GreyNoise Provider Configuration -->
+	<key>GreyNoiseEnabled</key>
+	<false/>
+	<key>GreyNoiseAPIURL</key>
+	<string>https://api.greynoise.io/v3</string>
+	<key>GreyNoiseAPIKey</key>
+	<string>YOUR_API_KEY_HERE</string>
+	<key>GreyNoiseTimeout</key>
+	<real>10.0</real>
+	<key>GreyNoiseMaxRequestsPerMin</key>
+	<integer>60</integer>
+	<key>GreyNoiseTTL</key>
+	<real>86400.0</real>
+
+	<!-- Shodan Provider Configuration -->
+	<key>ShodanEnabled</key>
+	<false/>
+	<key>ShodanAPIURL</key>
+	<string>https://api.shodan.io</string>
+	<key>ShodanAPIKey</key>
+	<string>YOUR_API_KEY_HERE</string>
+	<key>ShodanTimeout</key>
+	<real>10.0</real>
+	<key>ShodanMaxRequestsPerMin</key>
+	<integer>60</integer>
+	<key>ShodanTTL</key>
+	<real>86400.0</real>
+</dict>
+</plist>
