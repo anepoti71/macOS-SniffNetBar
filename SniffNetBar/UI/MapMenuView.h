@@ -16,6 +16,8 @@
 - (void)mapMenuView:(MapMenuView *)mapView didSelectConnectionWithSource:(NSString *)sourceIP destination:(NSString *)destinationIP;
 - (void)mapMenuViewDidClearSelection:(MapMenuView *)mapView;
 - (void)mapMenuView:(MapMenuView *)mapView didRequestAction:(NSString *)action forIP:(NSString *)ipAddress;
+- (void)mapMenuViewDidDetachMap:(MapMenuView *)mapView;
+- (void)mapMenuViewDidAttachMap:(MapMenuView *)mapView;
 @end
 
 /// Map layer type for visualization options
@@ -30,6 +32,7 @@ typedef NS_ENUM(NSInteger, SNBMapLayerType) {
 
 @property (nonatomic, copy) NSString *providerName;
 @property (nonatomic, assign, readonly) NSUInteger drawnConnectionCount;
+@property (nonatomic, assign, readonly) BOOL detachedWindowVisible;
 
 /// Current base layer type (standard or satellite)
 @property (nonatomic, assign) SNBMapLayerType baseLayerType;

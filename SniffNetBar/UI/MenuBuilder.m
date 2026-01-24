@@ -1546,7 +1546,7 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
     [self updateStatusWithStats:stats selectedDevice:selectedDevice];
     [self truncateMenuItemsInMenu:self.statusMenu maxWidth:config.menuFixedWidth];
 
-    if (self.showMap && self.menuIsOpen && self.mapMenuView) {
+    if (self.showMap && self.mapMenuView && (self.menuIsOpen || self.mapMenuView.detachedWindowVisible)) {
         [self.mapMenuView updateWithConnections:[self connectionsForMapFromStats:stats]
                              threatIntelResults:threatIntelResults
                                       blockedIPs:self.blockedIPs];
@@ -2326,7 +2326,9 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
 - (void)menuDidClose {
     self.menuIsOpen = NO;
     SNBLogUIDebug("Status menu closed");
-    [self tearDownMapMenuItem];
+    if (!self.mapMenuView.detachedWindowVisible) {
+        [self tearDownMapMenuItem];
+    }
     self.visualizationSubmenu = nil;
     self.detailsSubmenu = nil;
     self.topHostsSectionHeader = nil;
@@ -2921,7 +2923,7 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
     [visualizationSubmenu addItem:detailsItem];
 
     // Details submenu content
-    if (self.showMap && self.menuIsOpen) {
+    if (self.showMap && self.menuIsOpen && !self.mapMenuView.detachedWindowVisible) {
         if (self.mapMenuItem.menu && self.mapMenuItem.menu != detailsSubmenu) {
             [self.mapMenuItem.menu removeItem:self.mapMenuItem];
         }
@@ -2931,7 +2933,12 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
             [detailsSubmenu addItem:[NSMenuItem separatorItem]];
         }
     } else {
-        [self tearDownMapMenuItem];
+        if (self.mapMenuItem.menu) {
+            [self.mapMenuItem.menu removeItem:self.mapMenuItem];
+        }
+        if (!self.mapMenuView.detachedWindowVisible) {
+            [self tearDownMapMenuItem];
+        }
     }
 
     NSString *captureValue = [self captureStartDisplayValue];
@@ -3435,6 +3442,14 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
         self.lastSelectionRefreshTime = [NSDate timeIntervalSinceReferenceDate];
         SNBLogUIDebug("Refreshed sections after clearing selection");
     }
+}
+
+- (void)mapMenuViewDidDetachMap:(MapMenuView *)mapView {
+    [self requestFullVisualizationRefresh];
+}
+
+- (void)mapMenuViewDidAttachMap:(MapMenuView *)mapView {
+    [self requestFullVisualizationRefresh];
 }
 
 - (void)mapMenuView:(MapMenuView *)mapView didRequestAction:(NSString *)action forIP:(NSString *)ipAddress {

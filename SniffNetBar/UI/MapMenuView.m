@@ -27,7 +27,7 @@ static const NSTimeInterval kFailedLookupRetryInterval = 1800.0;  // 30 minutes
 // Render debounce interval to reduce UI churn
 static const NSTimeInterval kRenderDebounceInterval = 0.25;
 
-@interface MapMenuView () <WKNavigationDelegate, WKScriptMessageHandler>
+@interface MapMenuView () <WKNavigationDelegate, WKScriptMessageHandler, NSWindowDelegate>
 @property (nonatomic, strong) WKWebView *webView;
 @property (nonatomic, strong) NSButton *zoomInButton;
 @property (nonatomic, strong) NSButton *zoomOutButton;
@@ -62,6 +62,9 @@ static const NSTimeInterval kRenderDebounceInterval = 0.25;
 @property (nonatomic, assign) NSUInteger lastRenderSignature;
 @property (nonatomic, strong) NSDate *lastCacheCleanupTime;
 @property (nonatomic, strong) dispatch_semaphore_t geoLocationSemaphore;
+@property (nonatomic, strong) NSWindow *detachedWindow;
+@property (nonatomic, strong) MapMenuView *detachedMapView;
+@property (nonatomic, assign) BOOL isDetachedInstance;
 // Thread-safe: written on background queue, read on main thread
 @property (atomic, assign, readwrite) NSUInteger drawnConnectionCount;
 // Event monitor for capturing clicks in menu context
@@ -98,6 +101,7 @@ static NSString *SNBLocationStoreDirectory(void) {
         WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
         [config.userContentController addScriptMessageHandler:self name:@"connectionSelect"];
         [config.userContentController addScriptMessageHandler:self name:@"mapAction"];
+        [config.userContentController addScriptMessageHandler:self name:@"mapDetach"];
         BOOL enableConsoleBridge = (SNBGetRuntimeLogLevel() >= SNBLogLevelDebug);
         if (enableConsoleBridge) {
             [config.userContentController addScriptMessageHandler:self name:@"consoleLog"];
@@ -144,6 +148,7 @@ static NSString *SNBLocationStoreDirectory(void) {
         _renderQueue = dispatch_queue_create("com.sniffnetbar.map.render", DISPATCH_QUEUE_SERIAL);
         NSUInteger semaphoreLimit = [ConfigurationManager sharedManager].geoLocationSemaphoreLimit;
         _geoLocationSemaphore = dispatch_semaphore_create((long)semaphoreLimit);
+        _isDetachedInstance = NO;
 
         NSString *savedProvider = [[NSUserDefaults standardUserDefaults] stringForKey:SNBUserDefaultsKeyMapProvider];
         NSString *defaultProvider = [ConfigurationManager sharedManager].defaultMapProvider;
@@ -300,6 +305,11 @@ static NSString *SNBLocationStoreDirectory(void) {
 - (void)dealloc {
     [self removeClickEventMonitor];
     [_session invalidateAndCancel];
+    if (self.detachedWindow) {
+        [self.detachedWindow close];
+        self.detachedWindow = nil;
+        self.detachedMapView = nil;
+    }
 
     // Cancel cleanup timer
     if (_cleanupTimerID) {
@@ -309,6 +319,49 @@ static NSString *SNBLocationStoreDirectory(void) {
     if (_renderDebounceTimerID) {
         [[SNBTimerCoordinator sharedCoordinator] cancelTimer:_renderDebounceTimerID];
         _renderDebounceTimerID = nil;
+    }
+}
+
+- (void)openDetachedWindow {
+    if (self.detachedWindow) {
+        [self.detachedWindow makeKeyAndOrderFront:nil];
+        return;
+    }
+
+    NSRect frame = NSMakeRect(0, 0, 900, 600);
+    NSWindowStyleMask style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
+                              NSWindowStyleMaskResizable | NSWindowStyleMaskMiniaturizable;
+    NSWindow *window = [[NSWindow alloc] initWithContentRect:frame
+                                                  styleMask:style
+                                                    backing:NSBackingStoreBuffered
+                                                      defer:NO];
+    window.title = @"SniffNetBar Map";
+    window.delegate = self;
+    window.minSize = NSMakeSize(800.0, 600.0);
+
+    MapMenuView *detachedView = [[MapMenuView alloc] initWithFrame:window.contentView.bounds];
+    detachedView.isDetachedInstance = YES;
+    detachedView.providerName = self.providerName;
+    detachedView.delegate = self.delegate;
+    detachedView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    [detachedView loadMapHTML];
+    [detachedView updateLayout];
+
+    window.contentView = detachedView;
+    [window center];
+    [window makeKeyAndOrderFront:nil];
+
+    self.detachedWindow = window;
+    self.detachedMapView = detachedView;
+
+    if (self.lastConnections) {
+        [detachedView updateWithConnections:self.lastConnections
+                         threatIntelResults:self.threatIntelResults
+                                  blockedIPs:self.blockedIPs];
+    }
+
+    if ([self.delegate respondsToSelector:@selector(mapMenuViewDidDetachMap:)]) {
+        [self.delegate mapMenuViewDidDetachMap:self];
     }
 }
 
@@ -489,6 +542,12 @@ static NSString *SNBLocationStoreDirectory(void) {
     }
     self.threatIntelResults = threatIntelResults ?: @{};
     self.blockedIPs = safeBlocked;
+
+    if (!self.isDetachedInstance && self.detachedMapView) {
+        [self.detachedMapView updateWithConnections:connections
+                                 threatIntelResults:self.threatIntelResults
+                                          blockedIPs:self.blockedIPs];
+    }
     if (!self.window) {
         return;
     }
@@ -1031,7 +1090,8 @@ static NSString *SNBLocationStoreDirectory(void) {
     NSInteger lineWeight = config.connectionLineWeight;
     CGFloat lineOpacity = config.connectionLineOpacity;
 
-  NSString *html = [NSString stringWithFormat:
+    NSString *isDetachedFlag = self.isDetachedInstance ? @"true" : @"false";
+    NSString *html = [NSString stringWithFormat:
 @"<!doctype html>\n"
 @"<html lang='en'>\n"
 @"<head>\n"
@@ -1046,7 +1106,7 @@ static NSString *SNBLocationStoreDirectory(void) {
 @"\n"
 @"    /* Popup UI */\n"
 @"    .leaflet-popup-content-wrapper{background:#ffffff;color:#1e293b;border-radius:10px;box-shadow:0 6px 24px rgba(0,0,0,0.16),0 0 0 1px rgba(0,0,0,0.05);max-width:320px;min-width:220px;}\n"
-@"    .leaflet-popup-content{margin:14px 16px;font-size:13px;line-height:1.55;}\n"
+@"    .leaflet-popup-content{margin:14px 16px;font-size:13px;line-height:1.55;max-height:220px;overflow-y:auto;-webkit-overflow-scrolling:touch;}\n"
 @"    .leaflet-popup-tip{background:#ffffff;}\n"
 @"    .leaflet-popup-content .location-header{color:#0f172a;font-weight:650;font-size:14px;margin-bottom:8px;display:flex;align-items:center;gap:6px;}\n"
 @"    .leaflet-popup-content .location-name{color:#64748b;font-size:12px;margin-bottom:10px;}\n"
@@ -1168,6 +1228,13 @@ static NSString *SNBLocationStoreDirectory(void) {
 @"        <path d='M9 4v14M15 6v14' stroke='currentColor' stroke-width='2' stroke-linecap='round' opacity='0.85'/>\n"
 @"      </svg>\n"
 @"    </button>\n"
+@"    <button class='mac-btn' id='btnDetach' title='Detach map' aria-label='Detach map'>\n"
+@"      <svg viewBox='0 0 24 24' fill='none'>\n"
+@"        <path d='M8 6h10v10' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/>\n"
+@"        <path d='M16 6l-8 8' stroke='currentColor' stroke-width='2' stroke-linecap='round'/>\n"
+@"        <rect x='4' y='8' width='10' height='12' rx='2' stroke='currentColor' stroke-width='2' opacity='0.6'/>\n"
+@"      </svg>\n"
+@"    </button>\n"
 @"    <button class='mac-btn' id='btnGroup' title='Group by ASN/Country' aria-label='Group by ASN/Country'>\n"
 @"      <svg viewBox='0 0 24 24' fill='none'>\n"
 @"        <path d='M7 7h10M7 12h10M7 17h10' stroke='currentColor' stroke-width='2' stroke-linecap='round'/>\n"
@@ -1256,6 +1323,7 @@ static NSString *SNBLocationStoreDirectory(void) {
 @"    var selectedLine=null,selectedGlow=null,hoverGlow=null;\n"
 @"    var pendingUpdate=null;\n"
 @"    var lastData=null;\n"
+@"    var isDetached=%@;\n"
 @"    var groupByASN=false;\n"
 @"    var newLayerEnabled=false;\n"
 @"    var newLayer=L.layerGroup().addTo(map);\n"
@@ -1677,6 +1745,7 @@ static NSString *SNBLocationStoreDirectory(void) {
 @"      var btnHeat=document.getElementById('btnHeat');\n"
 @"      var btnLegend=document.getElementById('btnLegend');\n"
 @"      var btnMap=document.getElementById('btnMap');\n"
+@"      var btnDetach=document.getElementById('btnDetach');\n"
 @"      var btnGroup=document.getElementById('btnGroup');\n"
 @"      var btnNew=document.getElementById('btnNew');\n"
 @"      var btnFilters=document.getElementById('btnFilters');\n"
@@ -1686,6 +1755,14 @@ static NSString *SNBLocationStoreDirectory(void) {
 @"      if(btnHeat){btnHeat.addEventListener('click',function(){var on=toggleHeatMap();setBtnOn('btnHeat',on);});}\n"
 @"      if(btnLegend){btnLegend.addEventListener('click',function(){var on=toggleLegend();setBtnOn('btnLegend',on);});}\n"
 @"      if(btnMap){btnMap.addEventListener('click',function(){cycleBaseLayer();setBtnOn('btnMap',true);setTimeout(function(){setBtnOn('btnMap',false);},180);});}\n"
+@"      if(btnDetach){\n"
+@"        if(isDetached){btnDetach.style.display='none';}\n"
+@"        else{btnDetach.addEventListener('click',function(){\n"
+@"          if(window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.mapDetach){\n"
+@"            window.webkit.messageHandlers.mapDetach.postMessage({action:'detach'});\n"
+@"          }\n"
+@"        });}\n"
+@"      }\n"
 @"      if(btnGroup){btnGroup.addEventListener('click',function(){var on=toggleGroupByASN();setBtnOn('btnGroup',on);});}\n"
 @"      if(btnNew){btnNew.addEventListener('click',function(){var on=toggleNewLayer();setBtnOn('btnNew',on);});}\n"
 @"      if(btnFilters){btnFilters.addEventListener('click',function(){var on=toggleFilters();setBtnOn('btnFilters',on);});}\n"
@@ -1706,7 +1783,7 @@ static NSString *SNBLocationStoreDirectory(void) {
 @"  </script>\n"
 @"</body>\n"
 @"</html>\n"
-, lineColor, lineColor, (long)lineWeight, lineColor, lineOpacity];
+, lineColor, lineColor, isDetachedFlag, (long)lineWeight, lineColor, lineOpacity];
     NSURL *resourceURL = [[NSBundle mainBundle] resourceURL];
     [self.webView loadHTMLString:html baseURL:resourceURL];
 }
@@ -1747,6 +1824,10 @@ static NSString *SNBLocationStoreDirectory(void) {
             (long)(red * 255.0),
             (long)(green * 255.0),
             (long)(blue * 255.0)];
+}
+
+- (BOOL)detachedWindowVisible {
+    return self.detachedWindow != nil;
 }
 
 - (NSString *)riskStateForIP:(NSString *)ipAddress {
@@ -2143,7 +2224,34 @@ static NSString *SNBLocationStoreDirectory(void) {
                 [self.delegate mapMenuView:self didRequestAction:action forIP:ipAddress];
             }
         }
+        return;
     }
+
+    if ([message.name isEqualToString:@"mapDetach"]) {
+        [self openDetachedWindow];
+    }
+}
+
+#pragma mark - NSWindowDelegate
+
+- (void)windowWillClose:(NSNotification *)notification {
+    if (notification.object == self.detachedWindow) {
+        self.detachedWindow = nil;
+        self.detachedMapView = nil;
+    }
+}
+
+- (BOOL)windowShouldClose:(NSWindow *)sender {
+    if (sender == self.detachedWindow) {
+        if ([self.delegate respondsToSelector:@selector(mapMenuViewDidAttachMap:)]) {
+            [self.delegate mapMenuViewDidAttachMap:self];
+        }
+        [self.detachedWindow orderOut:nil];
+        self.detachedWindow = nil;
+        self.detachedMapView = nil;
+        return NO;
+    }
+    return YES;
 }
 
 @end

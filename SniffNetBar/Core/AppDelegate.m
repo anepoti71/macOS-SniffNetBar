@@ -130,4 +130,8 @@
     [self.coordinator stop];
 }
 
+- (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender {
+    return NO;
+}
+
 @end
