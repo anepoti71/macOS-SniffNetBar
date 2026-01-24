@@ -17,8 +17,7 @@ APP_LAUNCHDAEMONS_DIR = $(CONTENTS_DIR)/Library/LaunchDaemons
 INSTALL_DIR = $(HOME)/Applications
 INSTALL_APP = $(INSTALL_DIR)/$(APP_NAME).app
 INFO_PLIST_SRC = Info.plist
-ICON_SRC = ../resources/logos/raw/icon_macos.png
-ICNS_SRC = ../resources/logos/raw/sniffnet.icns
+ICON_SRC = ../resources/logo/icon_macos.png
 OUI_SRC = ../resources/oui.csv
 FRAMEWORKS = -framework Cocoa -framework SystemConfiguration -framework WebKit -framework CoreLocation -framework Security -framework CoreML -framework ServiceManagement
 PCAP_LIBS = -lpcap
@@ -113,7 +112,6 @@ $(APP_BUNDLE): $(MACOS_DIR)/$(APP_NAME) $(HELPER_BINARY) $(BUILD_DIR)/unregister
 	@cp $(INFO_PLIST_SRC) $(CONTENTS_DIR)/Info.plist
 	@cp Config/Configuration.plist $(RESOURCES_DIR)/Configuration.plist
 	@cp $(ICON_SRC) $(RESOURCES_DIR)/icon_macos.png
-	@cp $(ICNS_SRC) $(RESOURCES_DIR)/sniffnet.icns
 	@cp $(OUI_SRC) $(RESOURCES_DIR)/oui.csv
 	@cp Scripts/anomaly_score.py $(RESOURCES_DIR)/anomaly_score.py
 	@cp Scripts/anomaly_train.py $(RESOURCES_DIR)/anomaly_train.py
