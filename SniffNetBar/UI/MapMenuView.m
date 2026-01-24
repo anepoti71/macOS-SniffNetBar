@@ -335,7 +335,7 @@ static NSString *SNBLocationStoreDirectory(void) {
                                                   styleMask:style
                                                     backing:NSBackingStoreBuffered
                                                       defer:NO];
-    window.title = @"SniffNetBar Map";
+    window.title = @"SniffNetBar MapToolbox";
     window.delegate = self;
     window.minSize = NSMakeSize(800.0, 600.0);
 
