@@ -21,7 +21,7 @@ libpcap capture plus a privileged helper that maps sockets to PIDs, which works 
 
 ## Architecture overview
 
-SniffNetBar is a macOS status-bar app with an AppCoordinator that wires together capture, modeling, threat intel, and UI rendering. The UI is centered around a MenuBuilder that builds a rich visualization menu and detail submenu, fed by TrafficStatistics and multiple service coordinators. Map and graph views render in-menu visualizations with supporting utilities like IP classification and badge registries.
+macOS-SniffNetBar is a macOS status-bar app with an AppCoordinator that wires together capture, modeling, threat intel, and UI rendering. The UI is centered around a MenuBuilder that builds a rich visualization menu and detail submenu, fed by TrafficStatistics and multiple service coordinators. Map and graph views render in-menu visualizations with supporting utilities like IP classification and badge registries.
 
 Behavior modeling and promotion are split into services: a modeling XPC service (with an in-process fallback) stores events and generates recommendations, while the promotion agent evaluates candidates and applies trust decisions or labels. A privileged helper XPC service handles packet capture and process lookup with elevated privileges. Storage relies on SQLite for behavioral data, trust history, anomaly records, and promotion logs, while threat intel is handled via provider integrations with caching and keychain-backed credentials.
 
@@ -34,7 +34,7 @@ Behavior modeling and promotion are split into services: a modeling XPC service 
 
 ## Helper signing (required for install)
 
-SniffNetBar uses a privileged helper installed via `SMAppService`. The helper only accepts
+macOS-SniffNetBar uses a privileged helper installed via `SMAppService`. The helper only accepts
 connections from a signed app with the same Team ID, so you must sign both the app and
 helper with a real Apple certificate (ad-hoc signing will fail).
 
@@ -122,4 +122,4 @@ The map uses Leaflet + OpenStreetMap tiles and looks up IP locations via a provi
 
 ## License
 
-Based on the original Sniffnet codebase (MIT OR Apache-2.0)
+Inspired by the original Sniffnet codebase (MIT OR Apache-2.0)
