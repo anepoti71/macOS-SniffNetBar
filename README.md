@@ -15,9 +15,8 @@ macOS menu bar network observer with process-level visibility, geo map, passive 
 - Adds agentic decision-making to promote, label, or flag connections based on trust signals
 - Uses emerging machine-learning heuristics to surface anomalies and elevate likely threats
 
-Note: SniffNetBar does not use Network Extension entitlements. It identifies connections via
-libpcap capture plus a privileged helper that maps sockets to PIDs, which works without
-`com.apple.developer.networking.networkextension`.
+Note: macOS-SniffNetBar does not use Network Extension entitlements. It identifies connections via
+libpcap capture plus a privileged helper that maps sockets to PIDs.
 
 ## Architecture overview
 
