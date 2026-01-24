@@ -9,11 +9,13 @@
 #import "TrafficStatistics.h"
 
 @class MapMenuView;
+@class TIEnrichmentResponse;
 
 @protocol MapMenuViewDelegate <NSObject>
 @optional
 - (void)mapMenuView:(MapMenuView *)mapView didSelectConnectionWithSource:(NSString *)sourceIP destination:(NSString *)destinationIP;
 - (void)mapMenuViewDidClearSelection:(MapMenuView *)mapView;
+- (void)mapMenuView:(MapMenuView *)mapView didRequestAction:(NSString *)action forIP:(NSString *)ipAddress;
 @end
 
 /// Map layer type for visualization options
@@ -39,6 +41,9 @@ typedef NS_ENUM(NSInteger, SNBMapLayerType) {
 @property (nonatomic, assign) BOOL legendVisible;
 
 - (void)updateWithConnections:(NSArray<ConnectionTraffic *> *)connections;
+- (void)updateWithConnections:(NSArray<ConnectionTraffic *> *)connections
+           threatIntelResults:(NSDictionary<NSString *, TIEnrichmentResponse *> *)threatIntelResults
+                    blockedIPs:(NSSet<NSString *> *)blockedIPs;
 
 /// Toggle between standard and satellite base layers
 - (void)toggleSatelliteLayer;

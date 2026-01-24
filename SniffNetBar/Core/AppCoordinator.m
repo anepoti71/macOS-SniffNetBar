@@ -721,6 +721,28 @@
     }];
 }
 
+- (void)menuBuilder:(id)sender didRequestMapAction:(NSString *)action forIP:(NSString *)ipAddress {
+    if (action.length == 0 || ipAddress.length == 0 || !self.eventPublisher) {
+        return;
+    }
+    NSString *normalizedAction = [action lowercaseString];
+    NSString *label = nil;
+    if ([normalizedAction isEqualToString:@"label"]) {
+        label = @"Trusted";
+    } else if ([normalizedAction isEqualToString:@"block"]) {
+        label = @"Blocked";
+    } else if ([normalizedAction isEqualToString:@"ignore"]) {
+        label = @"Safe";
+    }
+    if (!label) {
+        return;
+    }
+    [self.eventPublisher applyPromotion:ipAddress
+                                   label:label
+                                  reason:@"Map quick action"
+                              completion:nil];
+}
+
 #pragma mark - SNBPromotionAgentDelegate
 
 - (void)promotionAgent:(SNBPromotionAgent *)agent didAutoPromote:(SNBPromotionDecision *)decision {

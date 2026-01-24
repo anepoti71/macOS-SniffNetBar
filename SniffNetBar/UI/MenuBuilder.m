@@ -110,6 +110,7 @@ static NSString *SNBStoredDeviceName(void) {
 @property (nonatomic, strong) ThreatInfo *selectedThreatInfo;
 @property (nonatomic, strong) ConnectionTraffic *selectedThreatConnection;
 @property (nonatomic, strong) SNBTrustedIPStore *trustedStore;
+@property (nonatomic, strong) NSMutableSet<NSString *> *blockedIPs;
 
 // Section tracking for in-place updates
 @property (nonatomic, strong) NSMenuItem *networkActivitySectionHeader;
@@ -128,6 +129,7 @@ static NSString *SNBStoredDeviceName(void) {
 
 // Last stats for highlighting updates
 @property (nonatomic, strong) TrafficStats *lastTrafficStats;
+@property (nonatomic, copy) NSDictionary<NSString *, TIEnrichmentResponse *> *lastThreatIntelResults;
 
 // Fix 3: Track when selection-triggered refresh occurred to avoid redundant refreshes
 @property (nonatomic, assign) NSTimeInterval lastSelectionRefreshTime;
@@ -215,6 +217,7 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
         _showAllAssets = NO;
         _showProviderDetails = NO;
         _trustedStore = [SNBTrustedIPStore sharedStore];
+        _blockedIPs = [NSMutableSet set];
 
         // Load persisted settings from NSUserDefaults
         NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
@@ -1296,6 +1299,8 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
         return;
     }
 
+    self.lastThreatIntelResults = threatIntelResults ?: @{};
+
     // Update tracking values
     self.lastTotalBytes = stats.totalBytes;
     self.lastBytesPerSecond = stats.bytesPerSecond;
@@ -1542,7 +1547,9 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
     [self truncateMenuItemsInMenu:self.statusMenu maxWidth:config.menuFixedWidth];
 
     if (self.showMap && self.menuIsOpen && self.mapMenuView) {
-        [self.mapMenuView updateWithConnections:[self connectionsForMapFromStats:stats]];
+        [self.mapMenuView updateWithConnections:[self connectionsForMapFromStats:stats]
+                             threatIntelResults:threatIntelResults
+                                      blockedIPs:self.blockedIPs];
     }
 }
 
@@ -1595,7 +1602,9 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
     self.menuIsOpen = YES;
     SNBLogUIDebug("Status menu opened");
     if (self.showMap && self.mapMenuView) {
-        [self.mapMenuView updateWithConnections:[self connectionsForMapFromStats:stats]];
+        [self.mapMenuView updateWithConnections:[self connectionsForMapFromStats:stats]
+                             threatIntelResults:self.lastThreatIntelResults ?: @{}
+                                      blockedIPs:self.blockedIPs];
     }
 }
 
@@ -1609,6 +1618,7 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
                    recentNewAssets:(NSArray<SNBNetworkAsset *> *)recentNewAssets {
     // Save stats for highlighting updates when selection changes
     self.lastTrafficStats = stats;
+    self.lastThreatIntelResults = threatIntelResults ?: @{};
     [self updateNetworkActivityRateHistoryWithStats:stats];
 
     [self updateProcessHighlightColorsWithSummaries:stats.processSummaries ?: @[]];
@@ -1618,7 +1628,9 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
 
     NSArray<ConnectionTraffic *> *mapConnections = [self connectionsForMapFromStats:stats];
     if (self.showMap && self.mapMenuView) {
-        [self.mapMenuView updateWithConnections:mapConnections];
+        [self.mapMenuView updateWithConnections:mapConnections
+                             threatIntelResults:threatIntelResults
+                                      blockedIPs:self.blockedIPs];
         self.lastGeolocatedConnectionCount = self.mapMenuView.drawnConnectionCount;
     } else {
         self.lastGeolocatedConnectionCount = 0;
@@ -2343,7 +2355,9 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
     if (self.mapMenuView) {
         self.mapMenuView.providerName = self.mapProviderName;
         if (self.showMap && stats) {
-            [self.mapMenuView updateWithConnections:[self connectionsForMapFromStats:stats]];
+            [self.mapMenuView updateWithConnections:[self connectionsForMapFromStats:stats]
+                                 threatIntelResults:self.lastThreatIntelResults ?: @{}
+                                          blockedIPs:self.blockedIPs];
         }
     }
 }
@@ -2789,7 +2803,9 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
         // asynchronously on a background queue, so we cache the value to avoid blocking
         // the main thread. The count may be briefly stale but will converge as geolocation completes.
         if (self.showMap && self.mapMenuView) {
-            [self.mapMenuView updateWithConnections:mapConnections];
+            [self.mapMenuView updateWithConnections:mapConnections
+                                 threatIntelResults:self.lastThreatIntelResults ?: @{}
+                                          blockedIPs:self.blockedIPs];
             self.lastGeolocatedConnectionCount = self.mapMenuView.drawnConnectionCount;
         }
         if (mapConnections.count == 0) {
@@ -3419,6 +3435,29 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
         self.lastSelectionRefreshTime = [NSDate timeIntervalSinceReferenceDate];
         SNBLogUIDebug("Refreshed sections after clearing selection");
     }
+}
+
+- (void)mapMenuView:(MapMenuView *)mapView didRequestAction:(NSString *)action forIP:(NSString *)ipAddress {
+    if (action.length == 0 || ipAddress.length == 0) {
+        return;
+    }
+    NSString *normalizedAction = [action lowercaseString];
+    if ([normalizedAction isEqualToString:@"label"]) {
+        [self.trustedStore setTrusted:YES forIP:ipAddress];
+        [self.blockedIPs removeObject:ipAddress];
+    } else if ([normalizedAction isEqualToString:@"block"]) {
+        [self.trustedStore setTrusted:NO forIP:ipAddress];
+        [self.blockedIPs addObject:ipAddress];
+    } else if ([normalizedAction isEqualToString:@"ignore"]) {
+        [self.trustedStore setTrusted:NO forIP:ipAddress];
+        [self.blockedIPs removeObject:ipAddress];
+    }
+
+    if ([self.delegate respondsToSelector:@selector(menuBuilder:didRequestMapAction:forIP:)]) {
+        [self.delegate menuBuilder:self didRequestMapAction:normalizedAction forIP:ipAddress];
+    }
+
+    [self requestFullVisualizationRefresh];
 }
 
 @end

@@ -59,6 +59,8 @@
         "lon REAL,"
         "name TEXT,"
         "isp TEXT,"
+        "country TEXT,"
+        "asn TEXT,"
         "timestamp REAL"
         ");";
     char *err = NULL;
@@ -66,7 +68,25 @@
         SNBLogUIDebug("Could not create location table: %s", err ?: "unknown");
         sqlite3_free(err);
     }
+    [self ensureColumn:@"country" type:@"TEXT" inDatabase:db];
+    [self ensureColumn:@"asn" type:@"TEXT" inDatabase:db];
     _database = db;
+}
+
+- (void)ensureColumn:(const char *)name type:(const char *)type inDatabase:(sqlite3 *)db {
+    if (!db || !name || !type) {
+        return;
+    }
+    char checkSql[256];
+    snprintf(checkSql, sizeof(checkSql), "SELECT %s FROM locations LIMIT 1", name);
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, checkSql, -1, &stmt, NULL) != SQLITE_OK) {
+        char alterSql[256];
+        snprintf(alterSql, sizeof(alterSql), "ALTER TABLE locations ADD COLUMN %s %s", name, type);
+        sqlite3_exec(db, alterSql, NULL, NULL, NULL);
+    } else {
+        sqlite3_finalize(stmt);
+    }
 }
 
 - (void)close {
@@ -85,13 +105,13 @@
     __block NSDictionary<NSString *, id> *result = nil;
     dispatch_sync(self.ioQueue, ^{
         sqlite3_stmt *stmt = NULL;
-        const char *sql = "SELECT lat, lon, name, isp, timestamp FROM locations WHERE ip = ?1;";
+        const char *sql = "SELECT lat, lon, name, isp, country, asn, timestamp FROM locations WHERE ip = ?1;";
         if (sqlite3_prepare_v2(self.database, sql, -1, &stmt, NULL) != SQLITE_OK) {
             return;
         }
         sqlite3_bind_text(stmt, 1, ip.UTF8String, -1, SQLITE_TRANSIENT);
         if (sqlite3_step(stmt) == SQLITE_ROW) {
-            NSTimeInterval timestamp = sqlite3_column_double(stmt, 4);
+            NSTimeInterval timestamp = sqlite3_column_double(stmt, 6);
             if (self.expirationInterval > 0 && ([[NSDate date] timeIntervalSince1970] - timestamp) > self.expirationInterval) {
                 [self deleteLocationForIP:ip];
             } else {
@@ -99,6 +119,8 @@
                 double lon = sqlite3_column_double(stmt, 1);
                 const unsigned char *nameValue = sqlite3_column_text(stmt, 2);
                 const unsigned char *ispValue = sqlite3_column_text(stmt, 3);
+                const unsigned char *countryValue = sqlite3_column_text(stmt, 4);
+                const unsigned char *asnValue = sqlite3_column_text(stmt, 5);
                 NSMutableDictionary *payload = [NSMutableDictionary dictionary];
                 payload[@"lat"] = @(lat);
                 payload[@"lon"] = @(lon);
@@ -107,6 +129,12 @@
                 }
                 if (ispValue) {
                     payload[@"isp"] = [NSString stringWithUTF8String:(const char *)ispValue];
+                }
+                if (countryValue) {
+                    payload[@"country"] = [NSString stringWithUTF8String:(const char *)countryValue];
+                }
+                if (asnValue) {
+                    payload[@"asn"] = [NSString stringWithUTF8String:(const char *)asnValue];
                 }
                 result = [payload copy];
             }
@@ -122,7 +150,8 @@
     }
     dispatch_async(self.ioQueue, ^{
         sqlite3_stmt *stmt = NULL;
-        const char *sql = "INSERT OR REPLACE INTO locations (ip, lat, lon, name, isp, timestamp) VALUES (?1, ?2, ?3, ?4, ?5, ?6);";
+        const char *sql = "INSERT OR REPLACE INTO locations (ip, lat, lon, name, isp, country, asn, timestamp) "
+                          "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8);";
         if (sqlite3_prepare_v2(self.database, sql, -1, &stmt, NULL) != SQLITE_OK) {
             return;
         }
@@ -135,7 +164,11 @@
         sqlite3_bind_text(stmt, 4, nameText.UTF8String, -1, SQLITE_TRANSIENT);
         NSString *ispText = isp ?: @"";
         sqlite3_bind_text(stmt, 5, ispText.UTF8String, -1, SQLITE_TRANSIENT);
-        sqlite3_bind_double(stmt, 6, [[NSDate date] timeIntervalSince1970]);
+        NSString *countryText = location[@"country"] ?: @"";
+        sqlite3_bind_text(stmt, 6, countryText.UTF8String, -1, SQLITE_TRANSIENT);
+        NSString *asnText = location[@"asn"] ?: @"";
+        sqlite3_bind_text(stmt, 7, asnText.UTF8String, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_double(stmt, 8, [[NSDate date] timeIntervalSince1970]);
         if (sqlite3_step(stmt) != SQLITE_DONE) {
             SNBLogUIDebug("Failed to persist location for %s: %s", ip.UTF8String, sqlite3_errmsg(self.database));
         }

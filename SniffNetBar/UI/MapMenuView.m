@@ -14,6 +14,8 @@
 #import "SNBLocationStore.h"
 #import "SNBBadgeRegistry.h"
 #import "SNBTimerCoordinator.h"
+#import "ThreatIntelModels.h"
+#import "TrustedIPStore.h"
 #import "Logger.h"
 #import <WebKit/WebKit.h>
 #import <CoreLocation/CoreLocation.h>
@@ -40,6 +42,11 @@ static const NSTimeInterval kRenderDebounceInterval = 0.25;
 @property (nonatomic, strong) NSMutableSet<NSString *> *failedLookups;
 @property (nonatomic, strong) NSURLSession *session;
 @property (nonatomic, copy) NSArray<ConnectionTraffic *> *lastConnections;
+@property (nonatomic, copy) NSDictionary<NSString *, TIEnrichmentResponse *> *threatIntelResults;
+@property (nonatomic, copy) NSSet<NSString *> *blockedIPs;
+@property (nonatomic, strong) SNBTrustedIPStore *trustedStore;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSDate *> *firstSeenByIP;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSDate *> *lastSeenByIP;
 @property (nonatomic, copy) NSString *publicIPAddress;
 @property (nonatomic, strong) NSValue *publicIPCoordinate;
 @property (nonatomic, assign) BOOL publicIPLookupInFlight;
@@ -90,6 +97,7 @@ static NSString *SNBLocationStoreDirectory(void) {
 
         WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
         [config.userContentController addScriptMessageHandler:self name:@"connectionSelect"];
+        [config.userContentController addScriptMessageHandler:self name:@"mapAction"];
         BOOL enableConsoleBridge = (SNBGetRuntimeLogLevel() >= SNBLogLevelDebug);
         if (enableConsoleBridge) {
             [config.userContentController addScriptMessageHandler:self name:@"consoleLog"];
@@ -124,6 +132,11 @@ static NSString *SNBLocationStoreDirectory(void) {
                                                 expirationInterval:[ConfigurationManager sharedManager].locationCacheExpirationTime];
         _inFlightLookups = [NSMutableSet set];
         _failedLookups = [NSMutableSet set];
+        _trustedStore = [SNBTrustedIPStore sharedStore];
+        _firstSeenByIP = [NSMutableDictionary dictionary];
+        _lastSeenByIP = [NSMutableDictionary dictionary];
+        _blockedIPs = [NSSet set];
+        _threatIntelResults = @{};
         NSURLSessionConfiguration *sessionConfig = [NSURLSessionConfiguration ephemeralSessionConfiguration];
         sessionConfig.URLCache = nil;
         sessionConfig.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
@@ -353,7 +366,9 @@ static NSString *SNBLocationStoreDirectory(void) {
         [self installClickEventMonitor];
 
         if (self.lastConnections.count > 0) {
-            [self updateWithConnections:self.lastConnections];
+            [self updateWithConnections:self.lastConnections
+                     threatIntelResults:self.threatIntelResults
+                              blockedIPs:self.blockedIPs];
         }
     } else {
         // Remove the monitor when view is removed from window
@@ -453,16 +468,34 @@ static NSString *SNBLocationStoreDirectory(void) {
 }
 
 - (void)updateWithConnections:(NSArray<ConnectionTraffic *> *)connections {
+    [self updateWithConnections:connections threatIntelResults:self.threatIntelResults blockedIPs:self.blockedIPs];
+}
+
+- (void)updateWithConnections:(NSArray<ConnectionTraffic *> *)connections
+           threatIntelResults:(NSDictionary<NSString *, TIEnrichmentResponse *> *)threatIntelResults
+                    blockedIPs:(NSSet<NSString *> *)blockedIPs {
     if (![NSThread isMainThread]) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            [self updateWithConnections:connections];
+            [self updateWithConnections:connections threatIntelResults:threatIntelResults blockedIPs:blockedIPs];
         });
         return;
     }
 
     self.lastConnections = connections;
+    BOOL riskStateChanged = (self.threatIntelResults != threatIntelResults);
+    NSSet<NSString *> *safeBlocked = blockedIPs ?: [NSSet set];
+    if (!riskStateChanged && ![self.blockedIPs isEqualToSet:safeBlocked]) {
+        riskStateChanged = YES;
+    }
+    self.threatIntelResults = threatIntelResults ?: @{};
+    self.blockedIPs = safeBlocked;
     if (!self.window) {
         return;
+    }
+
+    [self updateSeenForConnections:connections];
+    if (riskStateChanged) {
+        [self markRenderDataDirty];
     }
 
     NSDate *now = [NSDate date];
@@ -480,6 +513,9 @@ static NSString *SNBLocationStoreDirectory(void) {
     if (connections.count == 0) {
         self.lastTargetIPs = @[];
         if ([self updateRenderSignatureWithConnections:connections targetIPs:self.lastTargetIPs]) {
+            [self markRenderDataDirty];
+            [self refreshMarkers];
+        } else if (riskStateChanged) {
             [self markRenderDataDirty];
             [self refreshMarkers];
         }
@@ -671,6 +707,37 @@ static NSString *SNBLocationStoreDirectory(void) {
     }];
 }
 
+- (void)updateSeenForConnections:(NSArray<ConnectionTraffic *> *)connections {
+    for (ConnectionTraffic *connection in connections) {
+        NSDate *activityDate = [self dateFromActivity:connection.lastActivity];
+        if (!activityDate) {
+            continue;
+        }
+        [self updateSeenForIP:connection.sourceAddress atDate:activityDate];
+        [self updateSeenForIP:connection.destinationAddress atDate:activityDate];
+    }
+}
+
+- (void)updateSeenForIP:(NSString *)ipAddress atDate:(NSDate *)date {
+    if (ipAddress.length == 0 || !date) {
+        return;
+    }
+    if (!self.firstSeenByIP[ipAddress]) {
+        self.firstSeenByIP[ipAddress] = date;
+    }
+    NSDate *lastSeen = self.lastSeenByIP[ipAddress];
+    if (!lastSeen || [lastSeen compare:date] == NSOrderedAscending) {
+        self.lastSeenByIP[ipAddress] = date;
+    }
+}
+
+- (NSDate *)dateFromActivity:(CFAbsoluteTime)activity {
+    if (activity <= 0) {
+        return nil;
+    }
+    return [NSDate dateWithTimeIntervalSinceReferenceDate:activity];
+}
+
 - (void)performRefreshMarkers {
     if (!self.mapReady) {
         return;
@@ -698,6 +765,35 @@ static NSString *SNBLocationStoreDirectory(void) {
         [self addBadgeInfoForIPAddress:connection.destinationAddress connection:connection map:badgeInfoByIP];
     }
 
+    NSMutableDictionary<NSString *, NSMutableSet<NSString *> *> *processesByIP = [NSMutableDictionary dictionary];
+    NSMutableDictionary<NSString *, NSNumber *> *connectionCountsByIP = [NSMutableDictionary dictionary];
+    for (ConnectionTraffic *connection in connections) {
+        NSString *processLabel = nil;
+        if (connection.processName.length > 0) {
+            if (connection.processPID != 0) {
+                processLabel = [NSString stringWithFormat:@"%@ (PID %d)", connection.processName, connection.processPID];
+            } else {
+                processLabel = connection.processName;
+            }
+        }
+        NSArray<NSString *> *addresses = @[connection.sourceAddress ?: @"", connection.destinationAddress ?: @""];
+        for (NSString *address in addresses) {
+            if (address.length == 0) {
+                continue;
+            }
+            NSNumber *count = connectionCountsByIP[address] ?: @0;
+            connectionCountsByIP[address] = @(count.integerValue + 1);
+            if (processLabel.length > 0) {
+                NSMutableSet<NSString *> *set = processesByIP[address];
+                if (!set) {
+                    set = [NSMutableSet set];
+                    processesByIP[address] = set;
+                }
+                [set addObject:processLabel];
+            }
+        }
+    }
+
     NSInteger maxLines = MIN(config.maxConnectionLinesToShow, connections.count);
     for (NSInteger i = 0; i < maxLines; i++) {
         ConnectionTraffic *connection = connections[i];
@@ -722,6 +818,8 @@ static NSString *SNBLocationStoreDirectory(void) {
             return;
         }
 
+        NSCalendar *calendar = [NSCalendar currentCalendar];
+        NSDate *startOfDay = [calendar startOfDayForDate:[NSDate date]];
         NSMutableDictionary<NSString *, NSMutableArray<NSDictionary *> *> *pointsByCoord = [NSMutableDictionary dictionary];
         for (NSString *ip in targetIPs) {
             NSDictionary *value = locationByIP[ip];
@@ -744,6 +842,18 @@ static NSString *SNBLocationStoreDirectory(void) {
             payload[@"title"] = isp.length > 0 ? [NSString stringWithFormat:@"%@\nISP: %@", locationPart, isp] : locationPart;
             payload[@"name"] = name ?: @"";
             payload[@"isp"] = isp ?: @"";
+            payload[@"country"] = value[@"country"] ?: @"";
+            payload[@"asn"] = value[@"asn"] ?: @"";
+            NSArray<NSString *> *processes = [[processesByIP[ip] allObjects] sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)] ?: @[];
+            payload[@"processes"] = processes;
+            payload[@"connectionCount"] = connectionCountsByIP[ip] ?: @0;
+            NSDate *firstSeen = strongSelf.firstSeenByIP[ip];
+            NSDate *lastSeen = strongSelf.lastSeenByIP[ip];
+            payload[@"firstSeen"] = firstSeen ? @([firstSeen timeIntervalSince1970]) : @0;
+            payload[@"lastSeen"] = lastSeen ? @([lastSeen timeIntervalSince1970]) : @0;
+            payload[@"riskState"] = [strongSelf riskStateForIP:ip] ?: @"Observed";
+            BOOL isNewToday = firstSeen && ([firstSeen compare:startOfDay] != NSOrderedAscending);
+            payload[@"isNewToday"] = @(isNewToday);
 
             // Group by 3 decimal places (~111m precision) to cluster nearby IPs
             NSString *coordKey = [NSString stringWithFormat:@"%.3f,%.3f", coord.latitude, coord.longitude];
@@ -766,6 +876,7 @@ static NSString *SNBLocationStoreDirectory(void) {
             pointData[@"isps"] = [group valueForKey:@"isp"];
             pointData[@"locationName"] = firstPoint[@"name"] ?: @"";
             NSMutableArray<NSDictionary *> *badges = [NSMutableArray array];
+            NSMutableArray<NSDictionary *> *details = [NSMutableArray array];
             for (NSDictionary *payload in group) {
                 NSString *ip = payload[@"ip"];
                 NSDictionary *badge = badgeInfoByIP[ip];
@@ -778,8 +889,12 @@ static NSString *SNBLocationStoreDirectory(void) {
                     badge = @{@"icon": icon ?: @"", @"color": colorHex};
                 }
                 [badges addObject:badge];
+                NSMutableDictionary *detail = [payload mutableCopy];
+                detail[@"badge"] = badge;
+                [details addObject:detail];
             }
             pointData[@"badgeInfos"] = badges;
+            pointData[@"ipDetails"] = details;
             if (group.count > 1) {
                 pointData[@"isDuplicate"] = @YES;
                 pointData[@"color"] = @"#ffad60";
@@ -799,9 +914,30 @@ static NSString *SNBLocationStoreDirectory(void) {
             [publicCoordValue getValue:&publicCoord];
         }
         if (publicIP.length > 0 && CLLocationCoordinate2DIsValid(publicCoord)) {
+            NSString *riskState = [strongSelf riskStateForIP:publicIP] ?: @"Observed";
+            NSDictionary *publicDetail = @{
+                @"ip": publicIP,
+                @"lat": @(publicCoord.latitude),
+                @"lon": @(publicCoord.longitude),
+                @"name": @"",
+                @"isp": @"",
+                @"country": @"",
+                @"asn": @"",
+                @"processes": @[],
+                @"connectionCount": @0,
+                @"firstSeen": @0,
+                @"lastSeen": @0,
+                @"riskState": riskState,
+                @"isNewToday": @NO,
+                @"badge": @{@"icon": @"", @"color": @"#94a3b8"}
+            };
             [points addObject:@{@"lat": @(publicCoord.latitude),
                                 @"lon": @(publicCoord.longitude),
-                                @"title": [NSString stringWithFormat:@"Public IP: %@", publicIP]}];
+                                @"title": [NSString stringWithFormat:@"Public IP: %@", publicIP],
+                                @"ips": @[publicIP],
+                                @"ipDetails": @[publicDetail],
+                                @"locationName": @"",
+                                @"isDuplicate": @NO}];
         }
 
         NSError *jsonError;
@@ -926,12 +1062,29 @@ static NSString *SNBLocationStoreDirectory(void) {
 @"    .leaflet-popup-content .ip-text{flex:1;display:flex;flex-direction:column;gap:2px;min-width:0;}\n"
 @"\n"
 @"    /* Markers */\n"
-@"    .cluster-marker{background:linear-gradient(135deg,#ef4444 0%%,#dc2626 100%%);border:3px solid rgba(255,255,255,0.95);border-radius:50%%;box-shadow:0 3px 12px rgba(239,68,68,0.40),0 0 0 4px rgba(239,68,68,0.15);display:flex;align-items:center;justify-content:center;color:white;font-weight:800;font-size:13px;transition:transform 0.2s ease;text-align:center;line-height:1;}\n"
+@"    .cluster-marker{--cluster-color:#ef4444;--cluster-color-dark:#dc2626;background:linear-gradient(135deg,var(--cluster-color) 0%%,var(--cluster-color-dark) 100%%);border:3px solid rgba(255,255,255,0.95);border-radius:50%%;box-shadow:0 3px 12px rgba(15,23,42,0.20),0 0 0 4px rgba(15,23,42,0.08);display:flex;align-items:center;justify-content:center;color:white;font-weight:800;font-size:13px;transition:transform 0.2s ease;text-align:center;line-height:1;}\n"
 @"    .cluster-marker>div{display:flex;align-items:center;justify-content:center;width:100%%;height:100%%;}\n"
 @"    .cluster-marker:hover{transform:scale(1.12);}\n"
-@"    .single-marker{width:28px;height:36px;position:relative;}\n"
-@"    .single-marker::before{content:'';position:absolute;bottom:0;left:50%%;transform:translateX(-50%%);width:0;height:0;border-left:14px solid transparent;border-right:14px solid transparent;border-top:20px solid #2563eb;filter:drop-shadow(0 2px 4px rgba(0,0,0,0.20));}\n"
-@"    .single-marker::after{content:'';position:absolute;top:4px;left:50%%;transform:translateX(-50%%);width:18px;height:18px;border-radius:50%%;background:#3b82f6;box-shadow:0 0 0 3px rgba(255,255,255,0.92),0 2px 8px rgba(37,99,235,0.40),inset 0 1px 3px rgba(255,255,255,0.50);}\n"
+@"    .single-marker{--pin-color:#3b82f6;--pin-color-dark:#2563eb;width:28px;height:36px;position:relative;}\n"
+@"    .single-marker::before{content:'';position:absolute;bottom:0;left:50%%;transform:translateX(-50%%);width:0;height:0;border-left:14px solid transparent;border-right:14px solid transparent;border-top:20px solid var(--pin-color-dark);filter:drop-shadow(0 2px 4px rgba(0,0,0,0.20));}\n"
+@"    .single-marker::after{content:'';position:absolute;top:4px;left:50%%;transform:translateX(-50%%);width:18px;height:18px;border-radius:50%%;background:var(--pin-color);box-shadow:0 0 0 3px rgba(255,255,255,0.92),0 2px 8px rgba(15,23,42,0.20),inset 0 1px 3px rgba(255,255,255,0.50);}\n"
+@"    .risk-pill{display:inline-flex;align-items:center;gap:6px;padding:3px 8px;border-radius:999px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;background:rgba(15,23,42,0.06);color:#1e293b;border:1px solid rgba(15,23,42,0.12);}\n"
+@"    .risk-pill::before{content:'';width:6px;height:6px;border-radius:50%%;background:currentColor;}\n"
+@"    .risk-trusted{color:#10b981;border-color:rgba(16,185,129,0.35);background:rgba(16,185,129,0.12);}\n"
+@"    .risk-observed{color:#3b82f6;border-color:rgba(59,130,246,0.35);background:rgba(59,130,246,0.12);}\n"
+@"    .risk-investigate{color:#f59e0b;border-color:rgba(245,158,11,0.35);background:rgba(245,158,11,0.12);}\n"
+@"    .risk-blocked{color:#ef4444;border-color:rgba(239,68,68,0.35);background:rgba(239,68,68,0.12);}\n"
+@"    .meta-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:10px 0 12px;}\n"
+@"    .meta-item{background:rgba(15,23,42,0.04);border:1px solid rgba(15,23,42,0.08);border-radius:8px;padding:6px 8px;}\n"
+@"    .meta-item span{display:block;color:#64748b;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:2px;}\n"
+@"    .meta-item strong{font-size:12px;color:#0f172a;font-weight:600;}\n"
+@"    .ip-meta{display:flex;align-items:center;gap:6px;flex-wrap:wrap;color:#64748b;font-size:11px;}\n"
+@"    .ip-subline{color:#94a3b8;font-size:11px;}\n"
+@"    .ip-actions{display:flex;gap:6px;margin-top:6px;}\n"
+@"    .action-btn{border-radius:999px;border:1px solid rgba(15,23,42,0.12);background:#f8fafc;color:#0f172a;font-size:10px;font-weight:700;padding:4px 8px;cursor:pointer;}\n"
+@"    .action-btn:hover{background:#ffffff;}\n"
+@"    .action-btn[data-action='block']{color:#b91c1c;border-color:rgba(185,28,28,0.3);}\n"
+@"    .ip-new{display:inline-flex;align-items:center;gap:4px;padding:2px 6px;border-radius:999px;font-size:10px;font-weight:700;color:#0f172a;background:rgba(14,165,233,0.12);border:1px solid rgba(14,165,233,0.3);}\n"
 @"\n"
 @"    /* Connections */\n"
 @"    .connection-line{filter:drop-shadow(0 1px 2px rgba(0,0,0,0.15));cursor:pointer;pointer-events:stroke;}\n"
@@ -1015,6 +1168,20 @@ static NSString *SNBLocationStoreDirectory(void) {
 @"        <path d='M9 4v14M15 6v14' stroke='currentColor' stroke-width='2' stroke-linecap='round' opacity='0.85'/>\n"
 @"      </svg>\n"
 @"    </button>\n"
+@"    <button class='mac-btn' id='btnGroup' title='Group by ASN/Country' aria-label='Group by ASN/Country'>\n"
+@"      <svg viewBox='0 0 24 24' fill='none'>\n"
+@"        <path d='M7 7h10M7 12h10M7 17h10' stroke='currentColor' stroke-width='2' stroke-linecap='round'/>\n"
+@"        <circle cx='5' cy='7' r='2' fill='currentColor' opacity='0.35'/>\n"
+@"        <circle cx='5' cy='12' r='2' fill='currentColor' opacity='0.35'/>\n"
+@"        <circle cx='5' cy='17' r='2' fill='currentColor' opacity='0.35'/>\n"
+@"      </svg>\n"
+@"    </button>\n"
+@"    <button class='mac-btn' id='btnNew' title='New IPs Today' aria-label='New IPs Today'>\n"
+@"      <svg viewBox='0 0 24 24' fill='none'>\n"
+@"        <path d='M12 3v6M12 15v6M3 12h6M15 12h6' stroke='currentColor' stroke-width='2' stroke-linecap='round'/>\n"
+@"        <circle cx='12' cy='12' r='3' stroke='currentColor' stroke-width='2' fill='none'/>\n"
+@"      </svg>\n"
+@"    </button>\n"
 @"    <button class='mac-btn' id='btnFilters' title='Filters' aria-label='Filters'>\n"
 @"      <svg viewBox='0 0 24 24' fill='none'>\n"
 @"        <path d='M4 6h16M7 12h10M10 18h4' stroke='currentColor' stroke-width='2' stroke-linecap='round'/>\n"
@@ -1030,8 +1197,13 @@ static NSString *SNBLocationStoreDirectory(void) {
 @"    <div class='legend-item'><div class='legend-line' style='background:%@'></div><span>Connection</span></div>\n"
 @"    <div class='legend-item'><div class='legend-line' style='background:#60a5fa'></div><span>Hovered</span></div>\n"
 @"    <div class='legend-item'><div class='legend-line' style='background:#f59e0b'></div><span>Selected</span></div>\n"
+@"    <div class='legend-item'><div class='legend-marker' style='background:#10b981'></div><span>Trusted</span></div>\n"
+@"    <div class='legend-item'><div class='legend-marker' style='background:#3b82f6'></div><span>Observed</span></div>\n"
+@"    <div class='legend-item'><div class='legend-marker' style='background:#f59e0b'></div><span>Investigate</span></div>\n"
+@"    <div class='legend-item'><div class='legend-marker' style='background:#ef4444'></div><span>Blocked</span></div>\n"
 @"    <div class='legend-item'><div class='legend-marker' style='background:#3b82f6'></div><span>Single IP</span></div>\n"
 @"    <div class='legend-item'><div class='legend-marker' style='background:#ef4444'></div><span>Clustered IPs</span></div>\n"
+@"    <div class='legend-item'><div class='legend-marker' style='border:2px solid #0ea5e9;background:transparent'></div><span>New today</span></div>\n"
 @"    <div class='legend-item'><div class='legend-gradient'></div><span>Heat intensity</span></div>\n"
 @"  </div>\n"
 @"\n"
@@ -1084,6 +1256,9 @@ static NSString *SNBLocationStoreDirectory(void) {
 @"    var selectedLine=null,selectedGlow=null,hoverGlow=null;\n"
 @"    var pendingUpdate=null;\n"
 @"    var lastData=null;\n"
+@"    var groupByASN=false;\n"
+@"    var newLayerEnabled=false;\n"
+@"    var newLayer=L.layerGroup().addTo(map);\n"
 @"\n"
 @"    var connectionCache=null;\n"
 @"    var lastConnCount=0;\n"
@@ -1176,6 +1351,18 @@ static NSString *SNBLocationStoreDirectory(void) {
 @"      return heatMapEnabled;\n"
 @"    }\n"
 @"\n"
+@"    function toggleGroupByASN(){\n"
+@"      groupByASN=!groupByASN;\n"
+@"      if(lastData){setMarkers(lastData.points,lastData.connections);}\n"
+@"      return groupByASN;\n"
+@"    }\n"
+@"\n"
+@"    function toggleNewLayer(){\n"
+@"      newLayerEnabled=!newLayerEnabled;\n"
+@"      if(lastData){setMarkers(lastData.points,lastData.connections);}\n"
+@"      return newLayerEnabled;\n"
+@"    }\n"
+@"\n"
 @"    function updateHeatData(points){\n"
 @"      heatData=[];\n"
 @"      if(points&&points.length){\n"
@@ -1190,6 +1377,22 @@ static NSString *SNBLocationStoreDirectory(void) {
 @"      if(heatPluginAvailable){\n"
 @"        if(heatLayer && heatLayer.setLatLngs){heatLayer.setLatLngs(heatData);}\n"
 @"        else if(heatMapEnabled && heatData.length){heatLayer=createHeatLayer(heatData);if(heatLayer)heatLayer.addTo(map);}\n"
+@"      }\n"
+@"    }\n"
+@"\n"
+@"    function updateNewLayer(points){\n"
+@"      newLayer.clearLayers();\n"
+@"      if(!newLayerEnabled||!points||!points.length) return;\n"
+@"      for(var i=0;i<points.length;i++){\n"
+@"        var p=points[i];\n"
+@"        if(typeof p.lat!=='number'||typeof p.lon!=='number') continue;\n"
+@"        var details=p.ipDetails||[];\n"
+@"        var isNew=false;\n"
+@"        for(var j=0;j<details.length;j++){\n"
+@"          if(details[j].isNewToday){isNew=true;break;}\n"
+@"        }\n"
+@"        if(!isNew) continue;\n"
+@"        L.circleMarker([p.lat,p.lon],{radius:12,color:'#0ea5e9',weight:2,fillColor:'#0ea5e9',fillOpacity:0.08}).addTo(newLayer);\n"
 @"      }\n"
 @"    }\n"
 @"\n"
@@ -1210,17 +1413,107 @@ static NSString *SNBLocationStoreDirectory(void) {
 @"    }\n"
 @"    function hideSelectedGlow(){if(selectedGlow){glowLayer.removeLayer(selectedGlow);selectedGlow=null;}}\n"
 @"\n"
+@"    var riskPalette={Trusted:'#10b981',Observed:'#3b82f6',Investigate:'#f59e0b',Blocked:'#ef4444'};\n"
+@"    function riskRank(state){\n"
+@"      switch(state){case 'Blocked':return 4;case 'Investigate':return 3;case 'Observed':return 2;case 'Trusted':return 1;default:return 2;}\n"
+@"    }\n"
+@"    function riskColor(state){return riskPalette[state]||riskPalette.Observed;}\n"
+@"    function darkenColor(hex,factor){\n"
+@"      if(!hex||hex[0]!=='#'||hex.length<7) return hex;\n"
+@"      var r=parseInt(hex.slice(1,3),16),g=parseInt(hex.slice(3,5),16),b=parseInt(hex.slice(5,7),16);\n"
+@"      r=Math.max(0,Math.min(255,Math.round(r*factor)));\n"
+@"      g=Math.max(0,Math.min(255,Math.round(g*factor)));\n"
+@"      b=Math.max(0,Math.min(255,Math.round(b*factor)));\n"
+@"      return '#' + [r,g,b].map(function(v){return ('0'+v.toString(16)).slice(-2);}).join('');\n"
+@"    }\n"
+@"    function formatTimestamp(ts){\n"
+@"      if(!ts||isNaN(ts)) return '—';\n"
+@"      var d=new Date(ts*1000);\n"
+@"      if(isNaN(d.getTime())) return '—';\n"
+@"      return d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) + ' · ' + d.toLocaleDateString();\n"
+@"    }\n"
+@"    function aggregateDetails(details){\n"
+@"      var connectionCount=0,firstSeen=null,lastSeen=null,processSet={},risk='Observed';\n"
+@"      for(var i=0;i<details.length;i++){\n"
+@"        var d=details[i]||{};\n"
+@"        connectionCount+=d.connectionCount||0;\n"
+@"        if(Array.isArray(d.processes)){\n"
+@"          d.processes.forEach(function(p){if(p)processSet[p]=true;});\n"
+@"        }\n"
+@"        if(d.firstSeen&&(!firstSeen||d.firstSeen<firstSeen)) firstSeen=d.firstSeen;\n"
+@"        if(d.lastSeen&&(!lastSeen||d.lastSeen>lastSeen)) lastSeen=d.lastSeen;\n"
+@"        var r=d.riskState||'Observed';\n"
+@"        if(riskRank(r)>riskRank(risk)) risk=r;\n"
+@"      }\n"
+@"      return {connectionCount:connectionCount,processes:Object.keys(processSet),firstSeen:firstSeen,lastSeen:lastSeen,riskState:risk};\n"
+@"    }\n"
+@"    function groupKey(detail){\n"
+@"      var asn=detail.asn||'Unknown ASN';\n"
+@"      var country=detail.country||'Unknown';\n"
+@"      return asn+'|'+country;\n"
+@"    }\n"
+@"    function groupPointsByASN(points){\n"
+@"      var grouped={};\n"
+@"      for(var i=0;i<points.length;i++){\n"
+@"        var p=points[i];\n"
+@"        var details=p.ipDetails||[];\n"
+@"        for(var j=0;j<details.length;j++){\n"
+@"          var d=details[j];\n"
+@"          if(typeof d.lat!=='number'||typeof d.lon!=='number') continue;\n"
+@"          var key=groupKey(d);\n"
+@"          var bucket=grouped[key];\n"
+@"          if(!bucket){bucket={count:0,lat:0,lon:0,ipDetails:[],asn:d.asn||'',country:d.country||''};grouped[key]=bucket;}\n"
+@"          bucket.count+=1;bucket.lat+=d.lat;bucket.lon+=d.lon;bucket.ipDetails.push(d);\n"
+@"        }\n"
+@"      }\n"
+@"      var result=[];\n"
+@"      Object.keys(grouped).forEach(function(key){\n"
+@"        var b=grouped[key];\n"
+@"        if(b.count===0) return;\n"
+@"        var lat=b.lat/b.count, lon=b.lon/b.count;\n"
+@"        result.push({\n"
+@"          lat:lat, lon:lon, ipDetails:b.ipDetails, ips:b.ipDetails.map(function(d){return d.ip;}),\n"
+@"          locationName:'', isDuplicate:b.ipDetails.length>1, groupTitle:(b.asn||'Unknown ASN')+' · '+(b.country||'Unknown')\n"
+@"        });\n"
+@"      });\n"
+@"      return result;\n"
+@"    }\n"
+@"\n"
 @"    function buildPopupForPoint(p){\n"
 @"      var popupContent='';\n"
-@"      if(Array.isArray(p.ips)&&p.ips.length>0){\n"
-@"        var count=p.ips.length;\n"
-@"        popupContent='<div class=\"location-header\">📍 '+count+' Connection'+(count>1?'s':'')+'</div>';\n"
-@"        if(p.locationName&&p.locationName.length>0){popupContent+='<div class=\"location-name\">'+esc(p.locationName)+'</div>';}\n"
+@"      var details=Array.isArray(p.ipDetails)?p.ipDetails:[];\n"
+@"      if(!details.length && Array.isArray(p.ips)){\n"
+@"        details=p.ips.map(function(ip,idx){return {ip:ip,isp:(p.isps&&p.isps[idx])||'',name:(p.names&&p.names[idx])||''};});\n"
+@"      }\n"
+@"      if(details.length){\n"
+@"        var agg=aggregateDetails(details);\n"
+@"        var headerTitle=p.groupTitle||p.locationName||'Location';\n"
+@"        var riskClass='risk-'+(agg.riskState||'Observed').toLowerCase();\n"
+@"        popupContent='<div class=\"location-header\">'\n"
+@"          +'<span class=\"risk-pill '+riskClass+'\">'+esc(agg.riskState||'Observed')+'</span>'\n"
+@"          +esc(headerTitle)+'</div>';\n"
+@"        if(p.locationName&&p.locationName.length>0&&p.groupTitle){\n"
+@"          popupContent+='<div class=\"location-name\">'+esc(p.locationName)+'</div>';\n"
+@"        }else if(p.locationName&&p.locationName.length>0){\n"
+@"          popupContent+='<div class=\"location-name\">'+esc(p.locationName)+'</div>';\n"
+@"        }\n"
+@"        var processText='—';\n"
+@"        if(agg.processes&&agg.processes.length){\n"
+@"          processText=agg.processes.slice(0,3).join(', ');\n"
+@"          if(agg.processes.length>3){processText+=' +'+(agg.processes.length-3)+' more';}\n"
+@"        }\n"
+@"        popupContent+='<div class=\"meta-grid\">'\n"
+@"          +'<div class=\"meta-item\"><span>Connections</span><strong>'+agg.connectionCount+'</strong></div>'\n"
+@"          +'<div class=\"meta-item\"><span>Processes</span><strong>'+esc(processText)+'</strong></div>'\n"
+@"          +'<div class=\"meta-item\"><span>First seen</span><strong>'+esc(formatTimestamp(agg.firstSeen))+'</strong></div>'\n"
+@"          +'<div class=\"meta-item\"><span>Last seen</span><strong>'+esc(formatTimestamp(agg.lastSeen))+'</strong></div>'\n"
+@"          +'</div>';\n"
 @"        popupContent+='<ul class=\"ip-list\">';\n"
-@"        for(var i=0;i<p.ips.length;i++){\n"
-@"          var ip=p.ips[i];\n"
-@"          var isp=p.isps&&p.isps[i]?p.isps[i]:'';\n"
-@"          var badge=p.badgeInfos&&p.badgeInfos[i]?p.badgeInfos[i]:null;\n"
+@"        for(var i=0;i<details.length;i++){\n"
+@"          var d=details[i]||{};\n"
+@"          var ip=d.ip||'';\n"
+@"          var isp=d.isp||d.name||'';\n"
+@"          var badge=d.badge||null;\n"
 @"          var badgeMarkup='';\n"
 @"          if(badge){\n"
 @"            var color=badge.color||'#94a3b8';\n"
@@ -1229,9 +1522,23 @@ static NSString *SNBLocationStoreDirectory(void) {
 @"              +'<span class=\"ip-badge-dot\" style=\"background:'+esc(color)+'\"></span>'\n"
 @"              +'<span class=\"ip-badge-icon\">'+esc(icon)+'</span></span>';\n"
 @"          }\n"
+@"          var metaParts=[];\n"
+@"          if(d.asn) metaParts.push(esc(d.asn));\n"
+@"          if(d.country) metaParts.push(esc(d.country));\n"
+@"          if(d.connectionCount) metaParts.push(d.connectionCount+' conn');\n"
+@"          var risk=d.riskState||'Observed';\n"
+@"          var riskBadge='<span class=\"risk-pill risk-'+risk.toLowerCase()+'\">'+esc(risk)+'</span>';\n"
+@"          var newBadge=d.isNewToday?'<span class=\"ip-new\">New today</span>':'';\n"
 @"          popupContent+='<li class=\"ip-item\">'+badgeMarkup+'<span class=\"ip-text\">'\n"
 @"            +'<span class=\"ip-address\">'+esc(ip)+'</span>'\n"
 @"            +(isp&&isp.length?'<span class=\"ip-company\">'+esc(isp)+'</span>':'')\n"
+@"            +(metaParts.length?'<span class=\"ip-subline\">'+metaParts.join(' · ')+'</span>':'')\n"
+@"            +'<span class=\"ip-meta\">'+riskBadge+newBadge+'</span>'\n"
+@"            +'<div class=\"ip-actions\">'\n"
+@"              +'<button class=\"action-btn\" data-action=\"label\" data-ip=\"'+esc(ip)+'\">Label</button>'\n"
+@"              +'<button class=\"action-btn\" data-action=\"block\" data-ip=\"'+esc(ip)+'\">Block</button>'\n"
+@"              +'<button class=\"action-btn\" data-action=\"ignore\" data-ip=\"'+esc(ip)+'\">Ignore</button>'\n"
+@"            +'</div>'\n"
 @"            +'</span></li>';\n"
 @"        }\n"
 @"        popupContent+='</ul>';\n"
@@ -1318,22 +1625,28 @@ static NSString *SNBLocationStoreDirectory(void) {
 @"      pendingUpdate=null;\n"
 @"\n"
 @"      clearMarkers();\n"
-@"      updateHeatData(points);\n"
+@"      var displayPoints=groupByASN?groupPointsByASN(points||[]):(points||[]);\n"
+@"      updateHeatData(displayPoints);\n"
+@"      updateNewLayer(displayPoints);\n"
 @"\n"
 @"      var bounds=[];\n"
-@"      if(points&&points.length){\n"
-@"        for(var i=0;i<points.length;i++){\n"
-@"          var p=points[i];\n"
+@"      if(displayPoints&&displayPoints.length){\n"
+@"        for(var i=0;i<displayPoints.length;i++){\n"
+@"          var p=displayPoints[i];\n"
 @"          if(typeof p.lat!=='number'||typeof p.lon!=='number') continue;\n"
 @"          var popupContent=buildPopupForPoint(p);\n"
+@"          var details=p.ipDetails||[];\n"
+@"          var agg=aggregateDetails(details);\n"
+@"          var color=riskColor(agg.riskState);\n"
+@"          var colorDark=darkenColor(color,0.8);\n"
 @"          var marker;\n"
 @"          if(p.isDuplicate){\n"
-@"            var count2=p.ips?p.ips.length:0;\n"
+@"            var count2=p.ips?p.ips.length:details.length;\n"
 @"            var size=Math.min(44,Math.max(28,count2*3+20));\n"
-@"            var icon2=L.divIcon({className:'cluster-marker',html:'<div>'+count2+'</div>',iconSize:[size,size],iconAnchor:[size/2,size/2]});\n"
+@"            var icon2=L.divIcon({className:'',html:'<div class=\"cluster-marker\" style=\"--cluster-color:'+color+';--cluster-color-dark:'+colorDark+'\"><div>'+count2+'</div></div>',iconSize:[size,size],iconAnchor:[size/2,size/2]});\n"
 @"            marker=L.marker([p.lat,p.lon],{icon:icon2});\n"
 @"          }else{\n"
-@"            var icon3=L.divIcon({className:'single-marker',html:'<div class=\"single-marker\"></div>',iconSize:[24,32],iconAnchor:[12,32]});\n"
+@"            var icon3=L.divIcon({className:'',html:'<div class=\"single-marker\" style=\"--pin-color:'+color+';--pin-color-dark:'+colorDark+'\"></div>',iconSize:[24,32],iconAnchor:[12,32]});\n"
 @"            marker=L.marker([p.lat,p.lon],{icon:icon3});\n"
 @"          }\n"
 @"          if(popupContent){marker.bindPopup(popupContent);}\n"
@@ -1364,6 +1677,8 @@ static NSString *SNBLocationStoreDirectory(void) {
 @"      var btnHeat=document.getElementById('btnHeat');\n"
 @"      var btnLegend=document.getElementById('btnLegend');\n"
 @"      var btnMap=document.getElementById('btnMap');\n"
+@"      var btnGroup=document.getElementById('btnGroup');\n"
+@"      var btnNew=document.getElementById('btnNew');\n"
 @"      var btnFilters=document.getElementById('btnFilters');\n"
 @"      if(btnToolbar&&toolbar){btnToolbar.addEventListener('click',function(){toolbar.classList.toggle('is-collapsed');});}\n"
 @"      if(btnZoomIn){btnZoomIn.addEventListener('click',function(){zoomIn();});}\n"
@@ -1371,10 +1686,23 @@ static NSString *SNBLocationStoreDirectory(void) {
 @"      if(btnHeat){btnHeat.addEventListener('click',function(){var on=toggleHeatMap();setBtnOn('btnHeat',on);});}\n"
 @"      if(btnLegend){btnLegend.addEventListener('click',function(){var on=toggleLegend();setBtnOn('btnLegend',on);});}\n"
 @"      if(btnMap){btnMap.addEventListener('click',function(){cycleBaseLayer();setBtnOn('btnMap',true);setTimeout(function(){setBtnOn('btnMap',false);},180);});}\n"
+@"      if(btnGroup){btnGroup.addEventListener('click',function(){var on=toggleGroupByASN();setBtnOn('btnGroup',on);});}\n"
+@"      if(btnNew){btnNew.addEventListener('click',function(){var on=toggleNewLayer();setBtnOn('btnNew',on);});}\n"
 @"      if(btnFilters){btnFilters.addEventListener('click',function(){var on=toggleFilters();setBtnOn('btnFilters',on);});}\n"
 @"    })();\n"
 @"\n"
-@"    window.SniffNetBar={setMarkers:setMarkers,zoomIn:zoomIn,zoomOut:zoomOut,resetView:resetView,cycleBaseLayer:cycleBaseLayer,toggleHeatMap:toggleHeatMap,toggleLegend:toggleLegend,toggleFilters:toggleFilters};\n"
+@"    document.addEventListener('click',function(e){\n"
+@"      var btn=e.target.closest('.action-btn');\n"
+@"      if(!btn) return;\n"
+@"      var action=btn.getAttribute('data-action');\n"
+@"      var ip=btn.getAttribute('data-ip');\n"
+@"      if(action&&ip&&window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.mapAction){\n"
+@"        window.webkit.messageHandlers.mapAction.postMessage({action:action,ip:ip});\n"
+@"      }\n"
+@"      e.preventDefault();\n"
+@"    });\n"
+@"\n"
+@"    window.SniffNetBar={setMarkers:setMarkers,zoomIn:zoomIn,zoomOut:zoomOut,resetView:resetView,cycleBaseLayer:cycleBaseLayer,toggleHeatMap:toggleHeatMap,toggleLegend:toggleLegend,toggleFilters:toggleFilters,toggleGroupByASN:toggleGroupByASN,toggleNewLayer:toggleNewLayer};\n"
 @"  </script>\n"
 @"</body>\n"
 @"</html>\n"
@@ -1419,6 +1747,24 @@ static NSString *SNBLocationStoreDirectory(void) {
             (long)(red * 255.0),
             (long)(green * 255.0),
             (long)(blue * 255.0)];
+}
+
+- (NSString *)riskStateForIP:(NSString *)ipAddress {
+    if (ipAddress.length == 0) {
+        return @"Observed";
+    }
+    if ([self.blockedIPs containsObject:ipAddress]) {
+        return @"Blocked";
+    }
+    if ([self.trustedStore isTrustedIP:ipAddress]) {
+        return @"Trusted";
+    }
+    TIEnrichmentResponse *response = self.threatIntelResults[ipAddress];
+    TIThreatVerdict verdict = response.scoringResult.verdict;
+    if (verdict == TIThreatVerdictMalicious || verdict == TIThreatVerdictSuspicious) {
+        return @"Investigate";
+    }
+    return @"Observed";
 }
 
 - (NSButton *)zoomButtonWithTitle:(NSString *)title action:(SEL)action {
@@ -1589,7 +1935,7 @@ static NSString *SNBLocationStoreDirectory(void) {
         NSString *urlString = nil;
 
         if ([provider isEqualToString:@"ip-api.com"]) {
-            urlString = [NSString stringWithFormat:@"https://ip-api.com/json/%@?fields=status,message,lat,lon,query", encodedIP];
+            urlString = [NSString stringWithFormat:@"https://ip-api.com/json/%@?fields=status,message,lat,lon,query,city,regionName,country,countryCode,isp,as", encodedIP];
         } else if ([provider isEqualToString:@"ipinfo.io"]) {
             NSString *token = [ConfigurationManager sharedManager].ipInfoAPIToken;
             NSString *encodedToken = token.length > 0 ? [token stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]] : @"";
@@ -1655,6 +2001,8 @@ static NSString *SNBLocationStoreDirectory(void) {
         BOOL success = NO;
         NSString *name = nil;
         NSString *isp = nil;
+        NSString *country = nil;
+        NSString *asn = nil;
         
         if ([provider isEqualToString:@"ip-api.com"]) {
             NSString *status = dict[@"status"];
@@ -1663,13 +2011,16 @@ static NSString *SNBLocationStoreDirectory(void) {
                 lon = [dict[@"lon"] doubleValue];
                 NSString *city = dict[@"city"];
                 NSString *region = dict[@"regionName"];
-                NSString *country = dict[@"country"];
+                NSString *countryName = dict[@"country"];
+                NSString *countryCode = dict[@"countryCode"];
                 isp = dict[@"isp"];
+                asn = dict[@"as"];
                 NSMutableArray<NSString *> *parts = [NSMutableArray array];
                 if (city.length > 0) [parts addObject:city];
                 if (region.length > 0) [parts addObject:region];
-                if (country.length > 0) [parts addObject:country];
+                if (countryName.length > 0) [parts addObject:countryName];
                 name = parts.count > 0 ? [parts componentsJoinedByString:@", "] : nil;
+                country = countryCode.length > 0 ? countryCode : countryName;
                 success = YES;
             }
         } else if ([provider isEqualToString:@"ipinfo.io"]) {
@@ -1680,7 +2031,7 @@ static NSString *SNBLocationStoreDirectory(void) {
                 lon = [parts[1] doubleValue];
                 NSString *city = dict[@"city"];
                 NSString *region = dict[@"region"];
-                NSString *country = dict[@"country"];
+                country = dict[@"country"];
                 NSString *org = dict[@"org"];
                 NSString *company = dict[@"company"];
                 if (org.length > 0) {
@@ -1688,6 +2039,7 @@ static NSString *SNBLocationStoreDirectory(void) {
                 } else if (company.length > 0) {
                     isp = company;
                 }
+                asn = org.length > 0 ? org : company;
                 NSMutableArray<NSString *> *nameParts = [NSMutableArray array];
                 if (city.length > 0) [nameParts addObject:city];
                 if (region.length > 0) [nameParts addObject:region];
@@ -1716,6 +2068,12 @@ static NSString *SNBLocationStoreDirectory(void) {
             }
             if (isp.length > 0) {
                 payload[@"isp"] = isp;
+            }
+            if (country.length > 0) {
+                payload[@"country"] = country;
+            }
+            if (asn.length > 0) {
+                payload[@"asn"] = asn;
             }
             dispatch_async(dispatch_get_main_queue(), ^{
                 [self.locationCache setObject:payload forKey:ip];
@@ -1767,6 +2125,22 @@ static NSString *SNBLocationStoreDirectory(void) {
                 [self.delegate mapMenuView:self didSelectConnectionWithSource:sourceIP destination:destinationIP];
             } else {
                 SNBLogUIDebug("connectionSelect: Delegate does not respond to selector or is nil");
+            }
+        }
+        return;
+    }
+
+    if ([message.name isEqualToString:@"mapAction"]) {
+        NSDictionary *data = message.body;
+        if (![data isKindOfClass:[NSDictionary class]]) {
+            SNBLogUIDebug("mapAction: Invalid data type");
+            return;
+        }
+        NSString *action = data[@"action"];
+        NSString *ipAddress = data[@"ip"];
+        if (action.length > 0 && ipAddress.length > 0) {
+            if ([self.delegate respondsToSelector:@selector(mapMenuView:didRequestAction:forIP:)]) {
+                [self.delegate mapMenuView:self didRequestAction:action forIP:ipAddress];
             }
         }
     }

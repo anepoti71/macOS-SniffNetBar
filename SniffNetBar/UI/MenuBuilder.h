@@ -15,6 +15,7 @@
 
 @protocol MenuBuilderDelegate <NSObject>
 - (void)menuBuilderNeedsVisualizationRefresh:(id)sender;
+- (void)menuBuilder:(id)sender didRequestMapAction:(NSString *)action forIP:(NSString *)ipAddress;
 @end
 
 @interface MenuBuilder : NSObject <MapMenuViewDelegate>
