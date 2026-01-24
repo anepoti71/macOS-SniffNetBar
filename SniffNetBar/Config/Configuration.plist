@@ -16,9 +16,9 @@
 	<key>MaxTopConnectionsToShow</key>
 	<integer>5</integer>
 	<key>MapMenuViewHeight</key>
-	<real>220.0</real>
+	<real>320.0</real>
 	<key>MenuFixedWidth</key>
-	<real>420.0</real>
+	<real>480.0</real>
 
 	<!-- Reconnection Configuration -->
 	<key>ReconnectDelay</key>

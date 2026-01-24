@@ -81,8 +81,8 @@ BOOL SNBConfigurationManagerIsInitializing(void) {
         @"DeviceListRefreshInterval": @30.0,
         @"MaxTopHostsToShow": @5,
         @"MaxTopConnectionsToShow": @10,
-        @"MapMenuViewHeight": @220.0,
-        @"MenuFixedWidth": @420.0,
+        @"MapMenuViewHeight": @320.0,
+        @"MenuFixedWidth": @480.0,
         @"ReconnectDelay": @5.0,
         @"MaxReconnectAttempts": @3,
         @"PacketPollingInterval": @0.05,  // 50ms = 20 wakeups/sec (was 10ms = 100/sec)
@@ -256,7 +256,7 @@ BOOL SNBConfigurationManagerIsInitializing(void) {
 
 - (CGFloat)mapMenuViewHeight {
     NSNumber *value = self.configuration[@"MapMenuViewHeight"];
-    return value ? [value doubleValue] : 220.0;
+    return value ? [value doubleValue] : 320.0;
 }
 
 - (CGFloat)menuFixedWidth {
@@ -264,7 +264,7 @@ BOOL SNBConfigurationManagerIsInitializing(void) {
     if (!value) {
         value = self.configuration[@"MenuMaxWidth"];
     }
-    return value ? [value doubleValue] : 420.0;
+    return value ? [value doubleValue] : 480.0;
 }
 
 #pragma mark - Reconnection Configuration
