@@ -1,17 +1,19 @@
-# SniffNetBar
+# macOS-SniffNetBar
 
 macOS menu bar network observer with process-level visibility, geo map, passive alerts, agentic decision-making, and emerging machine learning for smarter threat promotion & anomaly spotting. Extended from Sniffnet.
 
 
 ## What it does
 
-- Monitors network traffic in the macOS menubar
-- Captures and analyzes packets with libpcap
-- Tracks totals, packet counts, top hosts, and top connections
-- **Shows which process is creating each network connection**
-- Resolves hostnames with reverse DNS
-- Supports TCP, UDP, ICMP, IPv4, and IPv6
-- Includes an embedded map view (Leaflet) for public IP geolocation
+- Monitors live network traffic from the macOS menu bar with at-a-glance status
+- Captures and analyzes packets via libpcap for protocol-level visibility
+- Tracks totals, packet counts, top hosts, and top connections over time
+- Shows which local process is responsible for each network connection
+- Resolves hostnames using reverse DNS for easier identification
+- Supports TCP, UDP, ICMP, IPv4, and IPv6 traffic
+- Includes an embedded Leaflet map for public IP geolocation
+- Adds agentic decision-making to promote, label, or flag connections based on trust signals
+- Uses emerging machine-learning heuristics to surface anomalies and elevate likely threats
 
 Note: SniffNetBar does not use Network Extension entitlements. It identifies connections via
 libpcap capture plus a privileged helper that maps sockets to PIDs, which works without
