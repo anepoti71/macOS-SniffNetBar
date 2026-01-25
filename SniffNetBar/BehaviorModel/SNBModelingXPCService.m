@@ -35,6 +35,7 @@
         SNBBehaviorDatabase *database = [[SNBBehaviorDatabase alloc] initWithPath:dbPath];
         _eventStore = [[SNBEventStore alloc] initWithDatabase:database];
         _aggregateEngine = [[SNBAggregateEngine alloc] initWithDatabase:database];
+        [_aggregateEngine prewarmCache]; // Pre-load top clusters for fast scoring
         _recommendationStore = [[SNBRecommendationStore alloc] initWithDatabase:database];
         _scoringEngine = [[SNBScoringEngine alloc] initWithConfig:nil];
     }
