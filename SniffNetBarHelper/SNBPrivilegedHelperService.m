@@ -222,6 +222,18 @@ static NSString *SNBTeamIdentifierForSelf(void) {
     }
 
     NSString *bundleID = [(__bridge NSDictionary *)signingInfo objectForKey:(__bridge id)kSecCodeInfoIdentifier];
+
+#ifdef SNIFFNETBAR_DEV_MODE
+    // Development mode: only check bundle ID, skip team ID validation
+    // This allows running without an Apple Developer certificate
+    BOOL isValid = [bundleID isEqualToString:@"com.sniffnetbar.app"];
+    if (!isValid) {
+        NSLog(@"Helper [DEV]: Invalid client bundle ID: %@", bundleID);
+    } else {
+        NSLog(@"Helper [DEV]: Accepted connection (team ID check disabled)");
+    }
+#else
+    // Production mode: require matching team ID
     NSString *teamID = [(__bridge NSDictionary *)signingInfo objectForKey:(__bridge id)kSecCodeInfoTeamIdentifier];
     BOOL isValid = [bundleID isEqualToString:@"com.sniffnetbar.app"] &&
         (self.teamIdentifier.length > 0) &&
@@ -229,6 +241,7 @@ static NSString *SNBTeamIdentifierForSelf(void) {
     if (!isValid) {
         NSLog(@"Helper: Invalid client signature (bundleID: %@, teamID: %@)", bundleID, teamID);
     }
+#endif
 
     CFRelease(signingInfo);
     CFRelease(code);

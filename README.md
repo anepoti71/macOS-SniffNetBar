@@ -63,7 +63,48 @@ This creates `build/SniffNetBar.app`.
 
 ## Certificate constraints
 
-The helper explicitly validates the connecting app’s bundle and team identifiers (`SniffNetBarHelper/SNBPrivilegedHelperService.m:120-235`). It caches its own `teamIdentifier` (via `SNBTeamIdentifierForSelf`) and returns `NO` from `validateConnection:` whenever `kSecCodeInfoTeamIdentifier` is missing or does not match (`SniffNetBarHelper/SNBPrivilegedHelperService.m:224-235`). Self-signed identities lack an Apple-issued team ID, so the helper refuses their connections; only Apple Development/Developer ID certificates that embed the same team ID for both app and helper can run SniffNetBar end-to-end.
+The helper explicitly validates the connecting app's bundle and team identifiers (`SniffNetBarHelper/SNBPrivilegedHelperService.m:120-235`). It caches its own `teamIdentifier` (via `SNBTeamIdentifierForSelf`) and returns `NO` from `validateConnection:` whenever `kSecCodeInfoTeamIdentifier` is missing or does not match (`SniffNetBarHelper/SNBPrivilegedHelperService.m:224-235`). Self-signed identities lack an Apple-issued team ID, so the helper refuses their connections; only Apple Development/Developer ID certificates that embed the same team ID for both app and helper can run SniffNetBar end-to-end.
+
+## Development without Apple Developer Account
+
+If you don't have an Apple Developer account ($99/year), you can still build and run SniffNetBar for development purposes using the **development mode** targets. This bypasses SMJobBless and team ID validation by manually installing the helper.
+
+### Quick Start (Development Mode)
+
+```bash
+# 1. Build the app and development helper
+make
+make helper-dev
+
+# 2. Install the development helper (requires sudo)
+sudo make install-helper-dev
+
+# 3. Run the app
+make run-dev
+```
+
+### How It Works
+
+Development mode differs from production in two ways:
+
+1. **Helper Build**: The helper is compiled with `-DSNIFFNETBAR_DEV_MODE`, which disables team ID validation. It only checks that the connecting app has the correct bundle ID (`com.sniffnetbar.app`).
+
+2. **Manual Installation**: Instead of using SMJobBless (which requires matching code signatures), the helper is manually installed to:
+   - Binary: `/Library/PrivilegedHelperTools/com.sniffnetbar.helper`
+   - Plist: `/Library/LaunchDaemons/com.sniffnetbar.helper.plist`
+
+### Development Targets
+
+| Target | Description |
+|--------|-------------|
+| `make helper-dev` | Build the development helper (no team ID validation) |
+| `sudo make install-helper-dev` | Install helper to system directories |
+| `sudo make uninstall-helper-dev` | Remove the development helper |
+| `make run-dev` | Run the app (after installing helper) |
+
+### Security Note
+
+Development mode is **not recommended for production use**. It bypasses security validations that ensure only your signed app can communicate with the privileged helper. For distribution, use the standard build with a valid Apple Developer certificate.
 
 ## Install
 

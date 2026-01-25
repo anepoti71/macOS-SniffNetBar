@@ -177,6 +177,76 @@ $(HELPER_BINARY): $(HELPER_SOURCES) | $(BUILD_DIR)
 		echo "Warning: CODESIGN_IDENTITY not set, skipping helper code signing"; \
 	fi
 
+# Development helper build (no Apple Developer certificate required)
+HELPER_DEV_BINARY = $(BUILD_DIR)/$(HELPER_NAME)-dev
+HELPER_DEV_INSTALL_PATH = /Library/PrivilegedHelperTools/$(HELPER_NAME)
+HELPER_DEV_PLIST_PATH = /Library/LaunchDaemons/$(HELPER_NAME).plist
+
+helper-dev: $(HELPER_DEV_BINARY)
+
+$(HELPER_DEV_BINARY): $(HELPER_SOURCES) | $(BUILD_DIR)
+	@echo "Building privileged helper for DEVELOPMENT (no team ID validation)..."
+	$(CC) $(OBJCFLAGS) $(SDK_FLAGS) -DSNIFFNETBAR_DEV_MODE $(HELPER_INCLUDES) $(PCAP_INCLUDE) \
+		$(HELPER_SOURCES) \
+		../SniffNetBar/Models/PacketInfo.m \
+		../SniffNetBar/XPC/PacketInfo+Serialization.m \
+		../SniffNetBar/XPC/ProcessInfo+Serialization.m \
+		-o $(HELPER_DEV_BINARY) \
+		$(PCAP_LIBDIR) $(PCAP_LIBS) -framework Foundation -framework Security
+	@echo "Development helper built: $(HELPER_DEV_BINARY)"
+	@echo ""
+	@echo "To install, run: make install-helper-dev"
+
+install-helper-dev: $(HELPER_DEV_BINARY)
+	@echo "Installing development helper (requires sudo)..."
+	@echo ""
+	@echo "WARNING: This bypasses SMJobBless and team ID validation."
+	@echo "         Use only for development without an Apple Developer account."
+	@echo ""
+	@if [ "$$(id -u)" != "0" ]; then \
+		echo "Error: This target must be run with sudo"; \
+		echo "  sudo make install-helper-dev"; \
+		exit 1; \
+	fi
+	@echo "Stopping existing helper (if running)..."
+	@launchctl bootout system/$(HELPER_NAME) 2>/dev/null || true
+	@echo "Installing helper binary to $(HELPER_DEV_INSTALL_PATH)..."
+	@mkdir -p /Library/PrivilegedHelperTools
+	@cp $(HELPER_DEV_BINARY) $(HELPER_DEV_INSTALL_PATH)
+	@chmod 544 $(HELPER_DEV_INSTALL_PATH)
+	@chown root:wheel $(HELPER_DEV_INSTALL_PATH)
+	@echo "Installing launchd plist to $(HELPER_DEV_PLIST_PATH)..."
+	@sed 's|/Applications/SniffNetBar.app/Contents/Library/LaunchDaemons/com.sniffnetbar.helper.app/Contents/MacOS/com.sniffnetbar.helper|$(HELPER_DEV_INSTALL_PATH)|g' \
+		../SniffNetBarHelper/launchd.plist > $(HELPER_DEV_PLIST_PATH)
+	@chmod 644 $(HELPER_DEV_PLIST_PATH)
+	@chown root:wheel $(HELPER_DEV_PLIST_PATH)
+	@echo "Loading helper daemon..."
+	@launchctl bootstrap system $(HELPER_DEV_PLIST_PATH)
+	@echo ""
+	@echo "Development helper installed successfully!"
+	@echo "You can now run the app with: make run-dev"
+
+uninstall-helper-dev:
+	@echo "Uninstalling development helper (requires sudo)..."
+	@if [ "$$(id -u)" != "0" ]; then \
+		echo "Error: This target must be run with sudo"; \
+		echo "  sudo make uninstall-helper-dev"; \
+		exit 1; \
+	fi
+	@echo "Stopping helper daemon..."
+	@launchctl bootout system/$(HELPER_NAME) 2>/dev/null || true
+	@echo "Removing helper binary..."
+	@rm -f $(HELPER_DEV_INSTALL_PATH)
+	@echo "Removing launchd plist..."
+	@rm -f $(HELPER_DEV_PLIST_PATH)
+	@echo "Development helper uninstalled."
+
+run-dev: $(APP_BUNDLE)
+	@echo "Running $(APP_NAME) in development mode..."
+	@echo "(Make sure you ran 'sudo make install-helper-dev' first)"
+	@pkill -x $(APP_NAME) >/dev/null 2>&1 || true
+	@$(APP_BUNDLE)/Contents/MacOS/$(APP_NAME)
+
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
@@ -353,7 +423,7 @@ $(BUILD_DIR)/TestRunner: $(LIB_OBJECTS) $(TEST_OBJECTS) | $(BUILD_DIR)
 test-build: $(LIB_OBJECTS) $(TEST_OBJECTS)
 	@echo "Test files compiled successfully"
 
-.PHONY: all clean install dmg run test tools test-build test-threat-intel test-process-lookup helper
+.PHONY: all clean install dmg run test tools test-build test-threat-intel test-process-lookup helper helper-dev install-helper-dev uninstall-helper-dev run-dev
 $(BUILD_DIR)/ModelingXPCService.xpc: $(BUILD_DIR)/ModelingXPCService | $(BUILD_DIR)
 	@echo "Packaging ModelingXPCService.xpc..."
 	@mkdir -p $(BUILD_DIR)/ModelingXPCService.xpc/Contents/MacOS
