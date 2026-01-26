@@ -7,9 +7,9 @@
 
 #import "AppDelegate.h"
 #import "AppCoordinator.h"
-#import "ConfigurationManager.h"
 #import "SMAppServiceHelper.h"
 #import "SNBPrivilegedHelperClient.h"
+#import "SNBStatusBarManager.h"
 #import "KeychainManager.h"
 #import "Logger.h"
 
@@ -67,35 +67,18 @@
     NSError *error = nil;
     [KeychainManager requestKeychainAccessWithError:&error];
 
-    // Create status item
-    NSStatusBar *statusBar = [NSStatusBar systemStatusBar];
-    self.statusItem = [statusBar statusItemWithLength:NSVariableStatusItemLength];
-    NSImage *statusImage = [NSImage imageNamed:@"icon_macos"];
-    if (!statusImage) {
-        NSString *iconPath = [[NSBundle mainBundle] pathForResource:@"icon_macos" ofType:@"png"];
-        statusImage = iconPath ? [[NSImage alloc] initWithContentsOfFile:iconPath] : nil;
-    }
-    if (statusImage) {
-        CGFloat targetSize = statusBar.thickness - 2.0;
-        statusImage.size = NSMakeSize(targetSize, targetSize);
-        statusImage.template = NO;
-        self.statusItem.button.image = statusImage;
-        self.statusItem.button.imageScaling = NSImageScaleProportionallyDown;
-        self.statusItem.button.title = @"";
-    } else {
-        SNBLogError("Status icon not found in bundle resources.");
-        self.statusItem.button.title = @"📊";
-    }
-    self.statusItem.button.target = self;
-    self.statusItem.button.action = @selector(statusItemClicked:);
-    [self.statusItem.button sendActionOn:NSEventMaskLeftMouseUp | NSEventMaskRightMouseUp];
-
     // Create menu
     self.statusMenu = [[NSMenu alloc] init];
     self.statusMenu.delegate = self;
 
+    // Create status item manager
+    self.statusBarManager = [[SNBStatusBarManager alloc] initWithStatusMenu:self.statusMenu];
+    [self.statusBarManager configureStatusItemWithImageNamed:@"icon_macos" fallbackTitle:@"📊"];
+    [self.statusBarManager setButtonTarget:self action:@selector(statusItemClicked:)];
+    [self.statusBarManager sendActionOn:NSEventMaskLeftMouseUp | NSEventMaskRightMouseUp];
+
     // Initialize coordinator
-    self.coordinator = [[AppCoordinator alloc] initWithStatusItem:self.statusItem
+    self.coordinator = [[AppCoordinator alloc] initWithStatusBarManager:self.statusBarManager
                                                        statusMenu:self.statusMenu];
 
     // Start the coordinator
@@ -105,10 +88,10 @@
 - (void)statusItemClicked:(id)sender {
     NSEvent *event = [NSApp currentEvent];
     if (event.type == NSEventTypeRightMouseUp) {
-        [self.statusItem popUpStatusItemMenu:self.statusMenu];
+        [self.statusBarManager popUpStatusMenu];
     } else {
         [self.coordinator updateMenu];
-        [self.statusItem popUpStatusItemMenu:self.statusMenu];
+        [self.statusBarManager popUpStatusMenu];
     }
 }
 

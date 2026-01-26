@@ -8,13 +8,19 @@
 #import "ByteFormatter.h"
 #import "ConfigurationManager.h"
 #import "MapMenuView.h"
+#import "MenuBuilderConstants.h"
+#import "SNBMenuAssetsSectionBuilder.h"
+#import "SNBMenuDetailsSectionBuilder.h"
+#import "SNBMenuThreatsSectionBuilder.h"
+#import "SNBMenuTopHostsSectionBuilder.h"
+#import "SNBStatusBarManager.h"
+#import "SNBMenuDataCache.h"
 #import "TrafficGraphView.h"
 #import "NetworkDevice.h"
 #import "ThreatIntelModels.h"
 #import "TrafficStatistics.h"
 #import "UserDefaultsKeys.h"
 #import "NetworkAssetMonitor.h"
-#import "IPAddressUtilities.h"
 #import <ifaddrs.h>
 #import <arpa/inet.h>
 #import "Logger.h"
@@ -57,7 +63,7 @@ static NSString *SNBStoredDeviceName(void) {
 
 @interface MenuBuilder ()
 @property (nonatomic, strong) NSMenu *statusMenu;
-@property (nonatomic, strong) NSStatusItem *statusItem;
+@property (nonatomic, strong) SNBStatusBarManager *statusBarManager;
 @property (nonatomic, strong) ConfigurationManager *configuration;
 @property (nonatomic, strong) MapMenuView *mapMenuView;
 @property (nonatomic, strong) NSMenuItem *mapMenuItem;
@@ -91,7 +97,11 @@ static NSString *SNBStoredDeviceName(void) {
 @property (nonatomic, strong) NSMenuItem *cleanConnectionsHeader;
 @property (nonatomic, strong) NSMenuItem *cleanConnectionsSeparator;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSDictionary<NSString *, id> *> *detailStatItemInfo;
-@property (nonatomic, strong) NSMutableDictionary<NSString *, NSColor *> *hostColorMap;
+@property (nonatomic, strong) SNBMenuDataCache *dataCache;
+@property (nonatomic, strong) SNBMenuThreatsSectionBuilder *threatsSectionBuilder;
+@property (nonatomic, strong) SNBMenuDetailsSectionBuilder *detailsSectionBuilder;
+@property (nonatomic, strong) SNBMenuTopHostsSectionBuilder *topHostsSectionBuilder;
+@property (nonatomic, strong) SNBMenuAssetsSectionBuilder *assetsSectionBuilder;
 @property (nonatomic, strong) NSMenuItem *processActivityHeader;
 @property (nonatomic, strong) NSMenuItem *processActivitySeparator;
 @property (nonatomic, strong) NSMutableArray<NSMenuItem *> *processActivityItems;
@@ -130,9 +140,6 @@ static NSString *SNBStoredDeviceName(void) {
 // Last stats for highlighting updates
 @property (nonatomic, strong) TrafficStats *lastTrafficStats;
 @property (nonatomic, copy) NSDictionary<NSString *, TIEnrichmentResponse *> *lastThreatIntelResults;
-@property (nonatomic, assign) CFAbsoluteTime lastStatsTimestampForMapConnections;
-@property (nonatomic, assign) CFAbsoluteTime lastStatsTimestampForHighlights;
-@property (nonatomic, copy) NSArray<ConnectionTraffic *> *cachedMapConnections;
 
 // Fix 3: Track when selection-triggered refresh occurred to avoid redundant refreshes
 @property (nonatomic, assign) NSTimeInterval lastSelectionRefreshTime;
@@ -146,16 +153,16 @@ static NSString *SNBStoredDeviceName(void) {
 // Performance: Increase refresh interval to reduce menu rebuilds
 static const CFAbsoluteTime kLocalIPCacheTTLSeconds = 60.0;
 
-static NSString * const SNBMenuItemKeyNetworkRate = @"networkRate";
-static NSString * const SNBMenuItemKeyNetworkTotal = @"networkTotal";
-static NSString * const SNBMenuItemKeyActiveConnections = @"activeConnections";
-static NSString * const SNBMenuItemKeyHosts = @"hosts";
-static NSString * const SNBMenuItemKeyNetworkDevicesTotal = @"networkDevicesTotal";
-static NSString * const SNBMenuItemKeyDetailIncoming = @"detailIncoming";
-static NSString * const SNBMenuItemKeyDetailOutgoing = @"detailOutgoing";
-static NSString * const SNBMenuItemKeyDetailTotal = @"detailTotal";
-static NSString * const SNBMenuItemKeyDetailPackets = @"detailPackets";
-static NSString * const SNBMenuItemKeyCaptureStart = @"detailCaptureStart";
+NSString * const SNBMenuItemKeyNetworkRate = @"networkRate";
+NSString * const SNBMenuItemKeyNetworkTotal = @"networkTotal";
+NSString * const SNBMenuItemKeyActiveConnections = @"activeConnections";
+NSString * const SNBMenuItemKeyHosts = @"hosts";
+NSString * const SNBMenuItemKeyNetworkDevicesTotal = @"networkDevicesTotal";
+NSString * const SNBMenuItemKeyDetailIncoming = @"detailIncoming";
+NSString * const SNBMenuItemKeyDetailOutgoing = @"detailOutgoing";
+NSString * const SNBMenuItemKeyDetailTotal = @"detailTotal";
+NSString * const SNBMenuItemKeyDetailPackets = @"detailPackets";
+NSString * const SNBMenuItemKeyCaptureStart = @"detailCaptureStart";
 
 static NSSet<NSString *> *SNBLocalIPAddresses(void) {
     static NSSet<NSString *> *cached = nil;
@@ -197,18 +204,22 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
 }
 
 - (instancetype)initWithMenu:(NSMenu *)menu
-                  statusItem:(NSStatusItem *)statusItem
+           statusBarManager:(SNBStatusBarManager *)statusBarManager
                configuration:(ConfigurationManager *)configuration {
     self = [super init];
     if (self) {
         _statusMenu = menu;
-        _statusItem = statusItem;
+        _statusBarManager = statusBarManager;
         _configuration = configuration;
         _statsReportAvailable = NO;
         _cachedMenuItems = [NSMutableDictionary dictionary];
         _dynamicStatItemInfo = [NSMutableDictionary dictionary];
         _detailStatItemInfo = [NSMutableDictionary dictionary];
-        _hostColorMap = [NSMutableDictionary dictionary];
+        _dataCache = [[SNBMenuDataCache alloc] init];
+        _topHostsSectionBuilder = [[SNBMenuTopHostsSectionBuilder alloc] init];
+        _detailsSectionBuilder = [[SNBMenuDetailsSectionBuilder alloc] initWithTopHostsBuilder:_topHostsSectionBuilder];
+        _threatsSectionBuilder = [[SNBMenuThreatsSectionBuilder alloc] init];
+        _assetsSectionBuilder = [[SNBMenuAssetsSectionBuilder alloc] init];
         _needsFullVisualizationRefresh = NO;
         _menuStructureBuilt = NO;
         _incomingRateHistory = [NSMutableArray arrayWithCapacity:kNetworkActivityGraphSampleCount];
@@ -542,26 +553,13 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
     self.lastTrafficStats = stats;
     self.lastThreatIntelResults = threatIntelResults ?: @{};
     [self updateNetworkActivityRateHistoryWithStats:stats];
-
-    if (stats.timestamp != self.lastStatsTimestampForHighlights) {
-        [self updateProcessHighlightColorsWithSummaries:stats.processSummaries ?: @[]];
-        self.lastStatsTimestampForHighlights = stats.timestamp;
-    }
-    if (stats.timestamp != self.lastStatsTimestampForMapConnections || !self.cachedMapConnections) {
-        self.cachedMapConnections = [self connectionsForMapFromStats:stats];
-        self.lastStatsTimestampForMapConnections = stats.timestamp;
-    }
+    [self.dataCache updateWithStats:stats
+                   selectedSourceIP:self.selectedSourceIP
+              selectedDestinationIP:self.selectedDestinationIP];
 }
 
 - (NSArray<ConnectionTraffic *> *)cachedMapConnectionsForStats:(TrafficStats *)stats {
-    if (!stats) {
-        return @[];
-    }
-    if (stats.timestamp != self.lastStatsTimestampForMapConnections || !self.cachedMapConnections) {
-        self.cachedMapConnections = [self connectionsForMapFromStats:stats];
-        self.lastStatsTimestampForMapConnections = stats.timestamp;
-    }
-    return self.cachedMapConnections ?: @[];
+    return [self.dataCache mapConnectionsForStats:stats];
 }
 
 - (NSMenuItem *)networkActivityGraphMenuItemWithWidth:(CGFloat)width {
@@ -596,29 +594,6 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
     [self.networkActivityGraphView updateWithIncomingRates:self.incomingRateHistory
                                             outgoingRates:self.outgoingRateHistory];
     return self.networkActivityGraphItem;
-}
-
-- (NSArray<ConnectionTraffic *> *)connectionsForMapFromStats:(TrafficStats *)stats {
-    NSArray<ConnectionTraffic *> *allConnections = stats.topConnections ?: @[];
-    if (allConnections.count == 0) {
-        return @[];
-    }
-
-    // Deduplicate connections by destination IP and filter to public IPs only
-    // Map visualization only shows connections to public (geolocatable) IPs
-    // This count matches what's actually displayed on the map
-    NSMutableDictionary<NSString *, ConnectionTraffic *> *uniquePublicDestinations = [NSMutableDictionary dictionary];
-    for (ConnectionTraffic *conn in allConnections) {
-        NSString *destIP = conn.destinationAddress;
-        if (destIP.length > 0 && [IPAddressUtilities isPublicIPAddress:destIP]) {
-            if (!uniquePublicDestinations[destIP]) {
-                uniquePublicDestinations[destIP] = conn;
-            }
-        }
-    }
-
-    // Return deduplicated public connections (matching map display)
-    return [uniquePublicDestinations allValues];
 }
 
 #pragma mark - Threat Sorting Helpers
@@ -1047,29 +1022,6 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
     return @"Not capturing";
 }
 
-- (NSColor *)highlightColorForProcessSummary:(ProcessTrafficSummary *)summary {
-    // Fix 5: Use enhanced method that also checks incoming traffic via topConnections
-    if ([self isProcessSummaryRelatedToSelectedConnection:summary]) {
-        return [NSColor systemYellowColor];
-    }
-
-    return [[SNBBadgeRegistry sharedRegistry] colorForProcessName:summary.processName
-                                                              pid:summary.processPID
-                                             createIfMissing:YES];
-}
-
-- (void)updateProcessHighlightColorsWithSummaries:(NSArray<ProcessTrafficSummary *> *)summaries {
-    [self.hostColorMap removeAllObjects];
-    for (ProcessTrafficSummary *summary in summaries) {
-        NSColor *color = [self highlightColorForProcessSummary:summary];
-        for (NSString *destination in summary.destinations) {
-            if (destination.length > 0 && !self.hostColorMap[destination]) {
-                self.hostColorMap[destination] = color;
-            }
-        }
-    }
-}
-
 - (NSColor *)processHighlightColorForConnection:(ConnectionTraffic *)connection {
     // Check if this connection is selected from the map
     if ([self isConnectionSelected:connection]) {
@@ -1105,7 +1057,7 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
         }
     }
 
-    NSColor *color = self.hostColorMap[address];
+    NSColor *color = self.dataCache.hostColorMap[address];
     if (!color) {
         color = [[SNBBadgeRegistry sharedRegistry] colorForLabel:address createIfMissing:YES];
     }
@@ -1141,39 +1093,6 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
             return YES;
         }
     }
-    return NO;
-}
-
-// Fix 5: Enhanced process correlation that also checks connections for incoming traffic
-- (BOOL)isProcessSummaryRelatedToSelectedConnection:(ProcessTrafficSummary *)summary {
-    if (!self.selectedSourceIP || !self.selectedDestinationIP) {
-        return NO;
-    }
-
-    // First check destinations (outgoing traffic) - existing logic
-    for (NSString *dest in summary.destinations) {
-        if ([dest isEqualToString:self.selectedSourceIP] ||
-            [dest isEqualToString:self.selectedDestinationIP]) {
-            return YES;
-        }
-    }
-
-    // Also check if any of this process's connections in topConnections matches the selection
-    // This handles incoming traffic where the process is the destination
-    if (self.lastTrafficStats.topConnections) {
-        for (ConnectionTraffic *conn in self.lastTrafficStats.topConnections) {
-            // Check if this connection belongs to this process
-            if (![conn.processName isEqualToString:summary.processName] ||
-                conn.processPID != summary.processPID) {
-                continue;
-            }
-            // Check if this connection matches the selected IPs (in either direction)
-            if ([self isConnectionSelected:conn]) {
-                return YES;
-            }
-        }
-    }
-
     return NO;
 }
 
@@ -1296,7 +1215,7 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
     NSAttributedString *outgoingAttr = [[NSAttributedString alloc] initWithString:outgoingStr];
     [statusDisplay appendAttributedString:outgoingAttr];
 
-    self.statusItem.button.attributedTitle = statusDisplay;
+    [self.statusBarManager updateButtonAttributedTitle:statusDisplay];
 }
 
 // Performance: Check if menu data needs updating
@@ -1580,7 +1499,8 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
     [self truncateMenuItemsInMenu:self.statusMenu maxWidth:config.menuFixedWidth];
 
     if (self.showMap && self.mapMenuView && (self.menuIsOpen || self.mapMenuView.detachedWindowVisible)) {
-        [self.mapMenuView updateWithConnections:[self connectionsForMapFromStats:stats]
+        NSArray<ConnectionTraffic *> *mapConnections = [self cachedMapConnectionsForStats:stats];
+        [self.mapMenuView updateWithConnections:mapConnections
                              threatIntelResults:threatIntelResults
                                       blockedIPs:self.blockedIPs];
     }
@@ -1753,68 +1673,8 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
     [self updateStatItemForKey:SNBMenuItemKeyNetworkDevicesTotal value:deviceSummary];
 }
 
-- (NSArray<NSMenuItem *> *)menuItemsForNetworkDevicesSectionWithAssets:(NSArray<SNBNetworkAsset *> *)networkAssets
-                                                       recentNewAssets:(NSArray<SNBNetworkAsset *> *)recentNewAssets
-                                                  assetMonitorEnabled:(BOOL)assetMonitorEnabled {
-    NSMutableArray<NSMenuItem *> *items = [NSMutableArray array];
-    if (!self.sectionNetworkDevicesExpanded) {
-        return items;
-    }
-
-    if (!assetMonitorEnabled) {
-        return items;
-    }
-
-    if (networkAssets.count == 0) {
-        return items;
-    }
-
-    NSString *newBadge = recentNewAssets.count > 0
-        ? [NSString stringWithFormat:@" (%lu new)", (unsigned long)recentNewAssets.count]
-        : @"";
-    NSString *summaryStr = [NSString stringWithFormat:@"%lu Device%@%@",
-                           (unsigned long)networkAssets.count,
-                           networkAssets.count == 1 ? @"" : @"s",
-                           newBadge];
-    NSMenuItem *devicesTotalItem = [self styledStatItemWithLabel:@"Total" value:summaryStr
-                                                          color:[NSColor labelColor]];
-    [items addObject:devicesTotalItem];
-
-    NSSet<NSString *> *localIPs = SNBLocalIPAddresses();
-    if (recentNewAssets.count > 0) {
-        [items addObject:[self styledMenuItemWithTitle:@"New Devices" style:@"subheader"]];
-        NSUInteger limit = MIN(3, recentNewAssets.count);
-        for (NSUInteger i = 0; i < limit; i++) {
-            SNBNetworkAsset *asset = recentNewAssets[i];
-
-            NSString *line;
-            BOOL isLocal = [localIPs containsObject:asset.ipAddress];
-            NSString *suffix = isLocal ? @" (This Mac)" : @"";
-
-            if (asset.hostname.length > 0 && asset.vendor.length > 0) {
-                line = [NSString stringWithFormat:@"  🆕 %@ (%@) - %@%@",
-                       asset.hostname, asset.vendor, asset.ipAddress, suffix];
-            } else if (asset.hostname.length > 0) {
-                line = [NSString stringWithFormat:@"  🆕 %@ - %@%@", asset.hostname, asset.ipAddress, suffix];
-            } else if (asset.vendor.length > 0) {
-                line = [NSString stringWithFormat:@"  🆕 %@ - %@%@", asset.vendor, asset.ipAddress, suffix];
-            } else {
-                line = [NSString stringWithFormat:@"  🆕 %@%@", asset.ipAddress, suffix];
-            }
-            NSMenuItem *item = [self styledListItemWithText:line
-                                                     color:[NSColor secondaryLabelColor]];
-            [items addObject:item];
-        }
-        if (recentNewAssets.count > limit) {
-            NSString *moreText = [NSString stringWithFormat:@"  ... and %lu more new",
-                                  (unsigned long)(recentNewAssets.count - limit)];
-            NSMenuItem *moreNewItem = [self styledListItemWithText:moreText
-                                                            color:[NSColor secondaryLabelColor]];
-            [items addObject:moreNewItem];
-        }
-    }
-
-    return items;
+- (NSSet<NSString *> *)localIPAddresses {
+    return SNBLocalIPAddresses();
 }
 
 - (void)replaceMenuItemsAfterHeader:(NSMenuItem *)header
@@ -1896,7 +1756,10 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
             processLabel = [processLabel stringByAppendingFormat:@" (PID %d)", summary.processPID];
         }
         NSString *bytesStr = [SNBByteFormatter stringFromBytes:summary.bytes];
-        NSColor *color = [self highlightColorForProcessSummary:summary];
+        NSColor *color = [self.dataCache highlightColorForProcessSummary:summary
+                                                                   stats:self.lastTrafficStats
+                                                         selectedSourceIP:self.selectedSourceIP
+                                                    selectedDestinationIP:self.selectedDestinationIP];
         NSString *icon = [[SNBBadgeRegistry sharedRegistry] badgeIconForProcessName:summary.processName
                                                                                 pid:summary.processPID
                                                                      fallbackLabel:processLabel];
@@ -1906,7 +1769,10 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
                                                           icon:icon
                                                      showBadge:YES];
         // Fix 5: Add checkmark for processes related to selected connection (including incoming traffic)
-        if ([self isProcessSummaryRelatedToSelectedConnection:summary]) {
+        if ([self.dataCache isProcessSummaryRelatedToSelectedConnection:summary
+                                                                  stats:self.lastTrafficStats
+                                                        selectedSourceIP:self.selectedSourceIP
+                                                   selectedDestinationIP:self.selectedDestinationIP]) {
             processItem.state = NSControlStateValueOn;
         }
         [items addObject:processItem];
@@ -1944,42 +1810,6 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
     }
     NSString *pidSuffix = connection.processPID > 0 ? [NSString stringWithFormat:@" (PID %d)", (int)connection.processPID] : @"";
     return [NSString stringWithFormat:@"%@%@ @ %@", connection.processName, pidSuffix, sourceAddress];
-}
-
-- (NSArray<NSMenuItem *> *)menuItemsForTopHostsSectionWithHosts:(NSArray<HostTraffic *> *)hosts {
-    if (!self.sectionTopHostsExpanded) {
-        return @[];
-    }
-    if (hosts.count == 0) {
-        NSMenuItem *emptyItem = [self styledStatItemWithLabel:@"No hosts captured yet"
-                                                       value:@""
-                                                       color:[NSColor secondaryLabelColor]];
-        return @[emptyItem];
-    }
-    NSInteger limit = MIN(self.configuration.maxTopHostsToShow, hosts.count);
-    if (limit == 0) {
-        return @[];
-    }
-
-    NSMutableArray<NSMenuItem *> *items = [NSMutableArray arrayWithCapacity:limit];
-    for (NSInteger i = 0; i < limit; i++) {
-        HostTraffic *host = hosts[i];
-        NSString *hostName = host.hostname.length > 0 ? host.hostname : @"";
-        NSString *hostDisplay = hostName.length > 0 ? [NSString stringWithFormat:@"%@ (%@)", hostName, host.address] : host.address;
-        NSString *bytesStr = [SNBByteFormatter stringFromBytes:host.bytes];
-        NSColor *hostColor = [self highlightColorForHostAddress:host.address];
-        NSString *icon = [self badgeIconForHost:host];
-        NSMenuItem *hostItem = [self styledStatItemWithLabel:hostDisplay
-                                                      value:bytesStr
-                                                      color:hostColor
-                                                       icon:icon];
-        // Add checkmark for selected hosts from map
-        if ([self isHostAddressSelected:host.address]) {
-            hostItem.state = NSControlStateValueOn;
-        }
-        [items addObject:hostItem];
-    }
-    return items;
 }
 
 - (NSArray<NSMenuItem *> *)menuItemsForTopConnectionsSectionWithConnections:(NSArray<ConnectionTraffic *> *)connections {
@@ -2033,14 +1863,12 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
 }
 
 - (void)refreshTopHostsSectionWithStats:(TrafficStats *)stats {
-    if (!self.detailsSubmenu || !self.topHostsSectionHeader) {
+    if (!self.detailsSubmenu) {
         return;
     }
-    NSArray<NSMenuItem *> *items = [self menuItemsForTopHostsSectionWithHosts:stats.topHosts];
-    [self replaceMenuItemsAfterHeader:self.topHostsSectionHeader
-                          beforeItem:self.topHostsSectionSeparator
-                                inMenu:self.detailsSubmenu
-                             withItems:items];
+    [self.topHostsSectionBuilder refreshWithStats:stats
+                                      detailsMenu:self.detailsSubmenu
+                                      menuBuilder:self];
 }
 
 - (void)refreshTopConnectionsSectionWithStats:(TrafficStats *)stats {
@@ -2296,31 +2124,17 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
 
 - (void)refreshCleanConnectionsSectionWithStats:(TrafficStats *)stats
                                threatIntelResults:(NSDictionary<NSString *, TIEnrichmentResponse *> *)threatIntelResults {
-    if (!self.visualizationSubmenu || !self.cleanConnectionsHeader) {
+    if (!self.visualizationSubmenu) {
         return;
     }
-    NSArray<NSString *> *activeCleanIPs = [self activeCleanConnectionsFromStats:stats
-                                                               threatIntelResults:threatIntelResults];
-    NSString *expandIndicator = self.showCleanConnections ? @"▼" : @"▶";
-    NSString *cleanTitle = [NSString stringWithFormat:@"%@ Observed Connections (%lu)",
-                            expandIndicator, (unsigned long)activeCleanIPs.count];
-    self.cleanConnectionsHeader.title = cleanTitle;
-    NSArray<NSMenuItem *> *items = [self menuItemsForCleanConnectionsSectionWithStats:stats
-                                                                     threatIntelResults:threatIntelResults];
-    [self replaceMenuItemsAfterHeader:self.cleanConnectionsHeader
-                          beforeItem:self.cleanConnectionsSeparator
-                                inMenu:self.visualizationSubmenu
-                             withItems:items];
+    [self.threatsSectionBuilder refreshCleanConnectionsWithStats:stats
+                                             threatIntelResults:threatIntelResults
+                                                         inMenu:self.visualizationSubmenu
+                                                    menuBuilder:self];
 }
 
 - (void)refreshDetailStatsWithStats:(TrafficStats *)stats {
-    NSString *captureValue = [self captureStartDisplayValue];
-    [self updateDetailItemForKey:SNBMenuItemKeyCaptureStart value:captureValue];
-
-    [self updateDetailItemForKey:SNBMenuItemKeyDetailIncoming value:[SNBByteFormatter stringFromBytes:stats.incomingBytes]];
-    [self updateDetailItemForKey:SNBMenuItemKeyDetailOutgoing value:[SNBByteFormatter stringFromBytes:stats.outgoingBytes]];
-    [self updateDetailItemForKey:SNBMenuItemKeyDetailTotal value:[SNBByteFormatter stringFromBytes:stats.totalBytes]];
-    [self updateDetailItemForKey:SNBMenuItemKeyDetailPackets value:[NSString stringWithFormat:@"%llu", stats.totalPackets]];
+    [self.detailsSectionBuilder refreshDetailStatsWithStats:stats menuBuilder:self];
 }
 
 - (void)refreshMaliciousConnectionsSectionWithStats:(TrafficStats *)stats
@@ -2340,17 +2154,14 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
 - (void)refreshNetworkDevicesSectionWithAssets:(NSArray<SNBNetworkAsset *> *)networkAssets
                                 recentNewAssets:(NSArray<SNBNetworkAsset *> *)recentNewAssets
                             assetMonitorEnabled:(BOOL)assetMonitorEnabled {
-    if (!self.networkDevicesSectionHeader || !self.visualizationSubmenu) {
+    if (!self.visualizationSubmenu) {
         return;
     }
-    NSArray<NSMenuItem *> *newItems = [self menuItemsForNetworkDevicesSectionWithAssets:networkAssets
-                                                                       recentNewAssets:recentNewAssets
-                                                                   assetMonitorEnabled:assetMonitorEnabled];
-    [self replaceMenuItemsAfterHeader:self.networkDevicesSectionHeader
-                          beforeItem:self.networkDevicesSectionSeparator
-                                inMenu:self.visualizationSubmenu
-                             withItems:newItems];
-    self.networkDevicesSectionItems = newItems.count > 0 ? [newItems mutableCopy] : [NSMutableArray array];
+    [self.assetsSectionBuilder refreshWithAssets:networkAssets
+                                 recentNewAssets:recentNewAssets
+                             assetMonitorEnabled:assetMonitorEnabled
+                                          inMenu:self.visualizationSubmenu
+                                     menuBuilder:self];
 }
 
 - (void)menuDidClose {
@@ -2361,6 +2172,10 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
     }
     self.visualizationSubmenu = nil;
     self.detailsSubmenu = nil;
+    [self.detailsSectionBuilder reset];
+    [self.topHostsSectionBuilder reset];
+    [self.threatsSectionBuilder reset];
+    [self.assetsSectionBuilder reset];
     self.topHostsSectionHeader = nil;
     self.topHostsSectionSeparator = nil;
     self.topConnectionsSectionHeader = nil;
@@ -2443,366 +2258,14 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
     }
 
     [visualizationSubmenu removeAllItems];
-    ConfigurationManager *config = self.configuration;
-
-    NSMenu *detailsSubmenu = [[NSMenu alloc] init];
-    NSMenuItem *detailsItem = [[NSMenuItem alloc] initWithTitle:@"Details" action:nil keyEquivalent:@""];
-    detailsItem.submenu = detailsSubmenu;
-    self.detailsSubmenu = detailsSubmenu;
-    self.topHostsSectionHeader = nil;
-    self.topHostsSectionSeparator = nil;
-    self.topConnectionsSectionHeader = nil;
-    self.topConnectionsSectionSeparator = nil;
-    self.maliciousConnectionsHeader = nil;
-    self.maliciousConnectionsSeparator = nil;
-    self.cleanConnectionsHeader = nil;
-    self.cleanConnectionsSeparator = nil;
-
-    // ============================================================================
-    // PHASE 1 & 2: Unified Threat Display with Severity Grouping
-    // ============================================================================
-
-    [visualizationSubmenu addItem:[self collapsibleSectionHeaderWithTitle:@"ACTIVE UNCLASSIFIED"
-                                                                  expanded:self.sectionThreatsExpanded
-                                                                    action:@selector(toggleSectionThreats)
-                                                                    target:self]];
-
-    // Reset threat counts (will be updated if threats are found)
-    self.activeMaliciousCount = 0;
-    self.activeSuspiciousCount = 0;
-
-    if (self.sectionThreatsExpanded) {
-        if (!threatIntelEnabled) {
-            NSMenuItem *disabledItem = [[NSMenuItem alloc] initWithTitle:@"✓ Threat Intel: Off"
-                                                                 action:nil
-                                                          keyEquivalent:@""];
-            disabledItem.enabled = NO;
-            [visualizationSubmenu addItem:disabledItem];
-        } else if (threatIntelStatusMessage.length > 0 && (threatIntelResults == nil || threatIntelResults.count == 0)) {
-            NSMenuItem *unavailableItem = [[NSMenuItem alloc] initWithTitle:threatIntelStatusMessage
-                                                                     action:nil
-                                                              keyEquivalent:@""];
-            unavailableItem.enabled = NO;
-            [visualizationSubmenu addItem:unavailableItem];
-        } else if (threatIntelResults == nil || threatIntelResults.count == 0) {
-            NSMenuItem *scanningItem = [[NSMenuItem alloc] initWithTitle:@"⟳ Scanning connections..."
-                                                              action:nil
-                                                       keyEquivalent:@""];
-            scanningItem.enabled = NO;
-            [visualizationSubmenu addItem:scanningItem];
-        } else {
-        // Get ALL active destination IPs for accurate threat detection
-        NSSet<NSString *> *activeDestIPs = stats.allActiveDestinationIPs ?: [NSSet set];
-
-        // Categorize threats by severity level (High/Medium/Low)
-        NSDictionary<NSNumber *, NSArray<ThreatInfo *> *> *categorizedThreats =
-            [self categorizeThreats:threatIntelResults activeIPs:activeDestIPs stats:stats];
-
-        NSArray<ThreatInfo *> *highThreats = categorizedThreats[@(ThreatSeverityHigh)] ?: @[];
-        NSArray<ThreatInfo *> *mediumThreats = categorizedThreats[@(ThreatSeverityMedium)] ?: @[];
-        NSArray<ThreatInfo *> *lowThreats = categorizedThreats[@(ThreatSeverityLow)] ?: @[];
-
-        // Separate active from historical
-        NSMutableArray<ThreatInfo *> *activeHighThreats = [NSMutableArray array];
-        NSMutableArray<ThreatInfo *> *historicalThreats = [NSMutableArray array];
-        for (ThreatInfo *threat in highThreats) {
-            if (threat.isActive) {
-                [activeHighThreats addObject:threat];
-            } else {
-                [historicalThreats addObject:threat];
-            }
-        }
-
-        NSMutableArray<ThreatInfo *> *activeMediumThreats = [NSMutableArray array];
-        for (ThreatInfo *threat in mediumThreats) {
-            if (threat.isActive) {
-                [activeMediumThreats addObject:threat];
-            } else {
-                [historicalThreats addObject:threat];
-            }
-        }
-
-        NSMutableArray<ThreatInfo *> *activeLowThreats = [NSMutableArray array];
-        for (ThreatInfo *threat in lowThreats) {
-            if (threat.isActive) {
-                [activeLowThreats addObject:threat];
-            } else {
-                [historicalThreats addObject:threat];
-            }
-        }
-
-        NSUInteger totalActiveThreats = activeHighThreats.count + activeMediumThreats.count + activeLowThreats.count;
-
-        // Update status bar alert counts (High = Malicious, Medium = Suspicious)
-        self.activeMaliciousCount = activeHighThreats.count;
-        self.activeSuspiciousCount = activeMediumThreats.count;
-
-        // Show threat summary
-        if (totalActiveThreats > 0) {
-            // Summary count with breakdown
-            NSString *summaryTitle;
-            if (activeHighThreats.count > 0 && activeMediumThreats.count > 0) {
-                summaryTitle = [NSString stringWithFormat:@"%lu Active Unclassified (%lu High, %lu Med)",
-                               (unsigned long)totalActiveThreats,
-                               (unsigned long)activeHighThreats.count,
-                               (unsigned long)activeMediumThreats.count];
-            } else if (activeHighThreats.count > 0) {
-                summaryTitle = [NSString stringWithFormat:@"%lu High Severity Unclassified",
-                               (unsigned long)activeHighThreats.count];
-            } else {
-                summaryTitle = [NSString stringWithFormat:@"%lu Active Unclassified",
-                               (unsigned long)totalActiveThreats];
-            }
-
-            NSMenuItem *alertItem = [[NSMenuItem alloc] initWithTitle:summaryTitle
-                                                              action:nil
-                                                       keyEquivalent:@""];
-            alertItem.enabled = NO;
-            NSImage *alertIcon = [NSImage imageWithSystemSymbolName:@"exclamationmark.triangle"
-                                            accessibilityDescription:nil];
-            if (alertIcon) {
-                NSImageSymbolConfiguration *config =
-                    [NSImageSymbolConfiguration configurationWithPointSize:12.0 weight:NSFontWeightSemibold];
-                alertIcon = [alertIcon imageWithSymbolConfiguration:config] ?: alertIcon;
-                alertIcon.template = YES;
-                alertItem.image = alertIcon;
-            }
-            NSFont *boldFont = [NSFont boldSystemFontOfSize:13.0];
-            NSDictionary *attributes = @{NSFontAttributeName: boldFont,
-                                       NSForegroundColorAttributeName: [NSColor systemRedColor]};
-            alertItem.attributedTitle = [[NSAttributedString alloc] initWithString:summaryTitle
-                                                                        attributes:attributes];
-            [visualizationSubmenu addItem:alertItem];
-
-            // HIGH SEVERITY THREATS (Always visible)
-            if (activeHighThreats.count > 0) {
-                [visualizationSubmenu addItem:[self severityHeaderForLevel:ThreatSeverityHigh count:activeHighThreats.count]];
-
-                for (ThreatInfo *threat in activeHighThreats) {
-                    [visualizationSubmenu addItem:[self enhancedThreatItemForThreat:threat]];
-                    [visualizationSubmenu addItem:[self threatDetailItemForThreat:threat]];
-                    NSArray<NSMenuItem *> *connItems = [self selectableThreatConnectionItemsForThreat:threat stats:stats];
-                    for (NSMenuItem *item in connItems) {
-                        [visualizationSubmenu addItem:item];
-                    }
-                }
-            }
-
-            // MEDIUM SEVERITY THREATS (Always visible)
-            if (activeMediumThreats.count > 0) {
-                [visualizationSubmenu addItem:[self severityHeaderForLevel:ThreatSeverityMedium count:activeMediumThreats.count]];
-
-                for (ThreatInfo *threat in activeMediumThreats) {
-                    [visualizationSubmenu addItem:[self enhancedThreatItemForThreat:threat]];
-                    [visualizationSubmenu addItem:[self threatDetailItemForThreat:threat]];
-                    NSArray<NSMenuItem *> *connItems = [self selectableThreatConnectionItemsForThreat:threat stats:stats];
-                    for (NSMenuItem *item in connItems) {
-                        [visualizationSubmenu addItem:item];
-                    }
-                }
-            }
-
-            // LOW SEVERITY THREATS (Expandable - collapsed by default)
-            if (activeLowThreats.count > 0) {
-                NSString *expandIndicator = self.showLowSeverityThreats ? @"▼" : @"▶";
-                NSString *lowTitle = [NSString stringWithFormat:@"%@ LOW SEVERITY (%lu)",
-                                     expandIndicator, (unsigned long)activeLowThreats.count];
-                NSMenuItem *lowToggle = [[NSMenuItem alloc] initWithTitle:lowTitle
-                                                                  action:@selector(toggleShowLowSeverityThreats)
-                                                           keyEquivalent:@""];
-                lowToggle.target = self;
-                [visualizationSubmenu addItem:lowToggle];
-
-                if (self.showLowSeverityThreats) {
-                    for (ThreatInfo *threat in activeLowThreats) {
-                        [visualizationSubmenu addItem:[self enhancedThreatItemForThreat:threat]];
-                        [visualizationSubmenu addItem:[self threatDetailItemForThreat:threat]];
-                        NSArray<NSMenuItem *> *connItems = [self selectableThreatConnectionItemsForThreat:threat stats:stats];
-                        for (NSMenuItem *item in connItems) {
-                            [visualizationSubmenu addItem:item];
-                        }
-                    }
-                }
-            }
-
-        } else {
-        NSMenuItem *cleanItem = [[NSMenuItem alloc] initWithTitle:@"No Active Unclassified"
-                                                              action:nil
-                                                       keyEquivalent:@""];
-        cleanItem.enabled = NO;
-        NSImage *cleanIcon = [NSImage imageWithSystemSymbolName:@"checkmark.circle"
-                                        accessibilityDescription:nil];
-        if (cleanIcon) {
-            NSImageSymbolConfiguration *config =
-                [NSImageSymbolConfiguration configurationWithPointSize:12.0 weight:NSFontWeightSemibold];
-            cleanIcon = [cleanIcon imageWithSymbolConfiguration:config] ?: cleanIcon;
-            cleanIcon.template = YES;
-            cleanItem.image = cleanIcon;
-        }
-        NSFont *systemFont = [NSFont systemFontOfSize:[NSFont systemFontSize]];
-        NSDictionary *attributes = @{NSFontAttributeName: systemFont,
-                                       NSForegroundColorAttributeName: [NSColor labelColor]};
-        cleanItem.attributedTitle = [[NSAttributedString alloc] initWithString:cleanItem.title
-                                                                    attributes:attributes];
-        [visualizationSubmenu addItem:cleanItem];
-        }
-
-        // HISTORICAL THREATS (Expandable - collapsed by default)
-        if (historicalThreats.count > 0) {
-            NSString *expandIndicator = self.showHistoricalThreats ? @"▼" : @"▶";
-            NSString *histTitle = [NSString stringWithFormat:@"%@ Closed Unclassified (%lu closed)",
-                                  expandIndicator, (unsigned long)historicalThreats.count];
-            NSMenuItem *histToggle = [[NSMenuItem alloc] initWithTitle:histTitle
-                                                                action:@selector(toggleShowHistoricalThreats)
-                                                         keyEquivalent:@""];
-            histToggle.target = self;
-            [visualizationSubmenu addItem:histToggle];
-
-            if (self.showHistoricalThreats) {
-                for (ThreatInfo *threat in historicalThreats) {
-                    [visualizationSubmenu addItem:[self enhancedThreatItemForThreat:threat]];
-                    [visualizationSubmenu addItem:[self threatDetailItemForThreat:threat]];
-                    NSArray<NSMenuItem *> *connItems = [self selectableThreatConnectionItemsForThreat:threat stats:stats];
-                    for (NSMenuItem *item in connItems) {
-                        [visualizationSubmenu addItem:item];
-                    }
-                }
-            }
-        }
-
-        if (self.selectedThreatInfo) {
-            NSArray<NSMenuItem *> *detailItems = [self menuItemsForSelectedThreatDetails:self.selectedThreatInfo];
-            if (detailItems.count > 0) {
-                NSMenuItem *detailsItem = [[NSMenuItem alloc] initWithTitle:@"Selected Unclassified Details"
-                                                                     action:nil
-                                                              keyEquivalent:@""];
-                detailsItem.enabled = YES;
-                NSMenu *detailsMenu = [[NSMenu alloc] initWithTitle:@"Selected Unclassified Details"];
-                [detailsMenu addItem:[self styledMenuItemWithTitle:@"Selected Unclassified Details" style:@"header"]];
-                for (NSMenuItem *item in detailItems) {
-                    [detailsMenu addItem:item];
-                }
-                detailsItem.submenu = detailsMenu;
-                [visualizationSubmenu addItem:[NSMenuItem separatorItem]];
-                [visualizationSubmenu addItem:detailsItem];
-            }
-        }
-
-        // CLEAN CONNECTIONS (Expandable - collapsed by default)
-        NSMutableArray<NSString *> *activeCleanIPs = [NSMutableArray array];
-        for (NSString *ip in threatIntelResults) {
-            TIEnrichmentResponse *response = threatIntelResults[ip];
-            TIScoringResult *scoring = response.scoringResult;
-            if (scoring && scoring.verdict == TIThreatVerdictClean && [activeDestIPs containsObject:ip]) {
-                [activeCleanIPs addObject:ip];
-            }
-        }
-
-        if (activeCleanIPs.count > 0) {
-            NSString *expandIndicator = self.showCleanConnections ? @"▼" : @"▶";
-            NSString *cleanTitle = [NSString stringWithFormat:@"%@ Observed Connections (%lu)",
-                                   expandIndicator, (unsigned long)activeCleanIPs.count];
-            NSMenuItem *cleanToggle = [[NSMenuItem alloc] initWithTitle:cleanTitle
-                                                                action:@selector(toggleShowCleanConnections)
-                                                         keyEquivalent:@""];
-            cleanToggle.target = self;
-            [visualizationSubmenu addItem:cleanToggle];
-            self.cleanConnectionsHeader = cleanToggle;
-
-            if (self.showCleanConnections) {
-                NSArray<NSMenuItem *> *cleanItems = [self menuItemsForCleanConnectionsSectionWithStats:stats
-                                                                                 threatIntelResults:threatIntelResults];
-                for (NSMenuItem *item in cleanItems) {
-                    [visualizationSubmenu addItem:item];
-                }
-            }
-            NSMenuItem *cleanSeparator = [NSMenuItem separatorItem];
-            self.cleanConnectionsSeparator = cleanSeparator;
-            [visualizationSubmenu addItem:cleanSeparator];
-        } else {
-            self.cleanConnectionsHeader = nil;
-            self.cleanConnectionsSeparator = nil;
-        }
-
-        if (self.promotionAgentEnabled) {
-            [self appendPromotionAgentSectionToMenu:visualizationSubmenu];
-            [visualizationSubmenu addItem:[NSMenuItem separatorItem]];
-        }
-
-        // LEGITIMATE CONNECTIONS SECTION (Expandable)
-        NSArray<SNBTrustContext *> *trustedContexts = [self.trustedStore allTrustedIPContexts];
-        if (trustedContexts.count > 0) {
-            NSString *expandIndicator = self.showTrustedIPs ? @"▼" : @"▶";
-            NSString *trustedTitle = [NSString stringWithFormat:@"%@ Legitimate Connections (%lu)",
-                                     expandIndicator, (unsigned long)trustedContexts.count];
-            NSMenuItem *trustedToggle = [[NSMenuItem alloc] initWithTitle:trustedTitle
-                                                                  action:@selector(toggleShowTrustedIPs)
-                                                           keyEquivalent:@""];
-            trustedToggle.target = self;
-
-            NSMutableAttributedString *trustedAttr = [[NSMutableAttributedString alloc] initWithString:trustedTitle];
-            [trustedAttr addAttribute:NSForegroundColorAttributeName
-                                value:[NSColor labelColor]
-                                range:NSMakeRange(0, trustedTitle.length)];
-            trustedToggle.attributedTitle = trustedAttr;
-
-            [visualizationSubmenu addItem:trustedToggle];
-
-            if (self.showTrustedIPs) {
-                for (SNBTrustContext *ctx in trustedContexts) {
-                    NSString *reasonStr = [SNBTrustContext displayStringForReason:ctx.reason];
-                    NSString *itemTitle = [NSString stringWithFormat:@"  %@ (%@)", ctx.ipAddress, reasonStr];
-
-                    NSMenuItem *ipItem = [[NSMenuItem alloc] initWithTitle:itemTitle
-                                                                    action:nil
-                                                             keyEquivalent:@""];
-                    ipItem.state = NSControlStateValueOn;  // Checkmark shows it's trusted
-
-                    // Style trusted items
-                    NSMutableAttributedString *ipAttr = [[NSMutableAttributedString alloc] initWithString:itemTitle];
-                    [ipAttr addAttribute:NSForegroundColorAttributeName
-                                   value:[NSColor secondaryLabelColor]
-                                   range:NSMakeRange(0, itemTitle.length)];
-                    [ipAttr addAttribute:NSFontAttributeName
-                                   value:[NSFont systemFontOfSize:11.0]
-                                   range:NSMakeRange(0, itemTitle.length)];
-                    ipItem.attributedTitle = ipAttr;
-
-                    NSMenu *trustedSubmenu = [[NSMenu alloc] initWithTitle:@"Legitimate Connection Actions"];
-                    NSMenuItem *untrustItem = [[NSMenuItem alloc] initWithTitle:@"Untrust"
-                                                                         action:@selector(moveTrustedIPToPreviousThreats:)
-                                                                  keyEquivalent:@""];
-                    untrustItem.target = self;
-                    untrustItem.representedObject = ctx.ipAddress;
-                    NSMutableAttributedString *untrustAttr = [[NSMutableAttributedString alloc] initWithString:@"Untrust"];
-                    [untrustAttr addAttribute:NSForegroundColorAttributeName
-                                        value:[NSColor systemRedColor]
-                                        range:NSMakeRange(0, untrustAttr.length)];
-                    untrustItem.attributedTitle = untrustAttr;
-                    [trustedSubmenu addItem:untrustItem];
-                    ipItem.submenu = trustedSubmenu;
-
-                    [visualizationSubmenu addItem:ipItem];
-                }
-            }
-            [visualizationSubmenu addItem:[NSMenuItem separatorItem]];
-        }
-
-        // Provider status (expandable)
-        if (self.showProviderDetails) {
-            [visualizationSubmenu addItem:[NSMenuItem separatorItem]];
-            [visualizationSubmenu addItem:[self styledMenuItemWithTitle:@"Provider Details" style:@"subheader"]];
-            if (cacheStats) {
-                NSString *sizeStr = [NSString stringWithFormat:@"%@", cacheStats[@"size"]];
-                NSString *hitRateStr = [NSString stringWithFormat:@"%.1f%%", [cacheStats[@"hitRate"] doubleValue] * 100];
-                NSString *statsStr = [NSString stringWithFormat:@"  Cache: %@ entries, %@ hit rate", sizeStr, hitRateStr];
-                NSMenuItem *statsItem = [[NSMenuItem alloc] initWithTitle:statsStr action:nil keyEquivalent:@""];
-                statsItem.enabled = NO;
-                [visualizationSubmenu addItem:statsItem];
-            }
-        }
-        }
-    }
+    [self.threatsSectionBuilder appendToMenu:visualizationSubmenu
+                                      stats:stats
+                          threatIntelEnabled:threatIntelEnabled
+                     threatIntelStatusMessage:threatIntelStatusMessage
+                           threatIntelResults:threatIntelResults
+                                  cacheStats:cacheStats
+                          selectedThreatInfo:self.selectedThreatInfo
+                                 menuBuilder:self];
 
     [visualizationSubmenu addItem:[NSMenuItem separatorItem]];
 
@@ -2829,7 +2292,7 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
         [visualizationSubmenu addItem:totalBytesItem];
 
         // Active connection counts - show both total and geolocated on same line
-        NSArray<ConnectionTraffic *> *mapConnections = [self connectionsForMapFromStats:stats];
+    NSArray<ConnectionTraffic *> *mapConnections = [self cachedMapConnectionsForStats:stats];
         NSUInteger totalPublicConnections = mapConnections.count;
 
         // Update map with current connections. Note: drawnConnectionCount is updated
@@ -2870,331 +2333,23 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
     self.networkActivitySectionSeparator = networkActivitySeparator;
     [visualizationSubmenu addItem:networkActivitySeparator];
 
-    if (assetMonitorEnabled) {
-        // Asset Monitor - Collapsible
-        NSMenuItem *networkDevicesHeader = [self collapsibleSectionHeaderWithTitle:@"NETWORK DEVICES"
-                                                                        expanded:self.sectionNetworkDevicesExpanded
-                                                                          action:@selector(toggleSectionNetworkDevices)
-                                                                          target:self];
-        self.networkDevicesSectionHeader = networkDevicesHeader;
-        [visualizationSubmenu addItem:networkDevicesHeader];
+    [self.assetsSectionBuilder appendToMenu:visualizationSubmenu
+                       assetMonitorEnabled:assetMonitorEnabled
+                            networkAssets:networkAssets
+                          recentNewAssets:recentNewAssets
+                              menuBuilder:self];
 
-        NSMutableArray<NSMenuItem *> *networkDevicesItems = [NSMutableArray array];
-        if (self.sectionNetworkDevicesExpanded) {
-            if (networkAssets.count == 0) {
-                NSMenuItem *emptyItem = [[NSMenuItem alloc] initWithTitle:@"⟳ Scanning network..."
-                                                                  action:nil
-                                                           keyEquivalent:@""];
-                emptyItem.enabled = NO;
-                [visualizationSubmenu addItem:emptyItem];
-                [networkDevicesItems addObject:emptyItem];
-            } else {
-                // Show device count summary
-                NSString *newBadge = recentNewAssets.count > 0 ? [NSString stringWithFormat:@" (%lu new)",
-                                                                    (unsigned long)recentNewAssets.count] : @"";
-                NSString *summaryStr = [NSString stringWithFormat:@"%lu Device%@%@",
-                                       (unsigned long)networkAssets.count,
-                                       networkAssets.count == 1 ? @"" : @"s",
-                                       newBadge];
-                NSMenuItem *devicesTotalItem = [self styledStatItemWithLabel:@"Total" value:summaryStr
-                                                                      color:[NSColor labelColor]];
-                [self cacheStatItem:devicesTotalItem label:@"Total" color:[NSColor labelColor]
-                              forKey:SNBMenuItemKeyNetworkDevicesTotal];
-                [visualizationSubmenu addItem:devicesTotalItem];
-                [networkDevicesItems addObject:devicesTotalItem];
-
-                // Always show new devices (important!)
-                if (recentNewAssets.count > 0) {
-                    NSMenuItem *newDevicesHeader = [self styledMenuItemWithTitle:@"New Devices" style:@"subheader"];
-                    [visualizationSubmenu addItem:newDevicesHeader];
-                    [networkDevicesItems addObject:newDevicesHeader];
-                    NSUInteger limit = MIN(3, recentNewAssets.count);
-                    for (NSUInteger i = 0; i < limit; i++) {
-                        SNBNetworkAsset *asset = recentNewAssets[i];
-
-                        // Build display name with hostname, vendor, and IP
-                        NSString *line;
-                        if (asset.hostname.length > 0 && asset.vendor.length > 0) {
-                            line = [NSString stringWithFormat:@"  🆕 %@ (%@)", asset.hostname, asset.vendor];
-                        } else if (asset.hostname.length > 0) {
-                            line = [NSString stringWithFormat:@"  🆕 %@", asset.hostname];
-                        } else if (asset.vendor.length > 0) {
-                            line = [NSString stringWithFormat:@"  🆕 %@ - %@", asset.vendor, asset.ipAddress];
-                        } else {
-                            line = [NSString stringWithFormat:@"  🆕 %@", asset.ipAddress];
-                        }
-
-                        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:line action:nil keyEquivalent:@""];
-                        item.enabled = NO;
-                        [visualizationSubmenu addItem:item];
-                        [networkDevicesItems addObject:item];
-                    }
-                    if (recentNewAssets.count > limit) {
-                        NSMenuItem *moreNewItem = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"  ... and %lu more new",
-                                                                                    (unsigned long)(recentNewAssets.count - limit)]
-                                                                            action:nil
-                                                                     keyEquivalent:@""];
-                        moreNewItem.enabled = NO;
-                        [visualizationSubmenu addItem:moreNewItem];
-                        [networkDevicesItems addObject:moreNewItem];
-                    }
-                }
-            }
-        }
-        self.networkDevicesSectionItems = networkDevicesItems;
-
-        NSMenuItem *networkDevicesSeparator = [NSMenuItem separatorItem];
-        self.networkDevicesSectionSeparator = networkDevicesSeparator;
-        [visualizationSubmenu addItem:networkDevicesSeparator];
-    } else {
-        self.networkDevicesSectionHeader = nil;
-        self.networkDevicesSectionSeparator = nil;
-        self.networkDevicesSectionItems = [NSMutableArray array];
-    }
+    NSMenuItem *detailsItem = [self.detailsSectionBuilder buildDetailsMenuItemWithStats:stats
+                                                                     threatIntelEnabled:threatIntelEnabled
+                                                                threatIntelStatusMessage:threatIntelStatusMessage
+                                                                      threatIntelResults:threatIntelResults
+                                                                               cacheStats:cacheStats
+                                                                     assetMonitorEnabled:assetMonitorEnabled
+                                                                          networkAssets:networkAssets
+                                                                        recentNewAssets:recentNewAssets
+                                                                             menuBuilder:self];
     [visualizationSubmenu addItem:detailsItem];
 
-    // Details submenu content
-    if (self.showMap && self.menuIsOpen && !self.mapMenuView.detachedWindowVisible) {
-        if (self.mapMenuItem.menu && self.mapMenuItem.menu != detailsSubmenu) {
-            [self.mapMenuItem.menu removeItem:self.mapMenuItem];
-        }
-        NSMenuItem *mapItem = [self mapMenuItemIfNeeded];
-        if (mapItem) {
-            [detailsSubmenu addItem:mapItem];
-            [detailsSubmenu addItem:[NSMenuItem separatorItem]];
-        }
-    } else {
-        if (self.mapMenuItem.menu) {
-            [self.mapMenuItem.menu removeItem:self.mapMenuItem];
-        }
-        if (!self.mapMenuView.detachedWindowVisible) {
-            [self tearDownMapMenuItem];
-        }
-    }
-
-    NSString *captureValue = [self captureStartDisplayValue];
-    NSMenuItem *captureItem = [self styledStatItemWithLabel:@"Capture started:" value:captureValue color:[NSColor labelColor]];
-    [self cacheDetailItem:captureItem label:@"Capture started:" color:[NSColor labelColor] forKey:SNBMenuItemKeyCaptureStart];
-    [detailsSubmenu addItem:captureItem];
-
-    NSString *incomingStr = [SNBByteFormatter stringFromBytes:stats.incomingBytes];
-    NSMenuItem *incomingItem = [self styledStatItemWithLabel:@"↓ Incoming:" value:incomingStr color:[NSColor labelColor]];
-    [self cacheDetailItem:incomingItem label:@"↓ Incoming:" color:[NSColor labelColor] forKey:SNBMenuItemKeyDetailIncoming];
-    [detailsSubmenu addItem:incomingItem];
-
-    NSString *outgoingStr = [SNBByteFormatter stringFromBytes:stats.outgoingBytes];
-    NSMenuItem *outgoingItem = [self styledStatItemWithLabel:@"↑ Outgoing:" value:outgoingStr color:[NSColor labelColor]];
-    [self cacheDetailItem:outgoingItem label:@"↑ Outgoing:" color:[NSColor labelColor] forKey:SNBMenuItemKeyDetailOutgoing];
-    [detailsSubmenu addItem:outgoingItem];
-
-    NSString *totalBytesStr = [SNBByteFormatter stringFromBytes:stats.totalBytes];
-    NSMenuItem *bytesItem = [self styledStatItemWithLabel:@"Total:" value:totalBytesStr color:[NSColor labelColor]];
-    [self cacheDetailItem:bytesItem label:@"Total:" color:[NSColor labelColor] forKey:SNBMenuItemKeyDetailTotal];
-    [detailsSubmenu addItem:bytesItem];
-
-    NSString *packetsStr = [NSString stringWithFormat:@"%llu", stats.totalPackets];
-    NSMenuItem *packetsItem = [self styledStatItemWithLabel:@"Packets:" value:packetsStr color:[NSColor labelColor]];
-    [self cacheDetailItem:packetsItem label:@"Packets:" color:[NSColor labelColor] forKey:SNBMenuItemKeyDetailPackets];
-    [detailsSubmenu addItem:packetsItem];
-
-    if (self.showTopHosts) {
-        [detailsSubmenu addItem:[NSMenuItem separatorItem]];
-        NSString *topHostsTitle = [NSString stringWithFormat:@"TOP %lu HOSTS by Traffic",
-                                    (unsigned long)self.configuration.maxTopHostsToShow];
-        NSMenuItem *topHostsHeader = [self collapsibleSectionHeaderWithTitle:topHostsTitle
-                                                                    expanded:self.sectionTopHostsExpanded
-                                                                      action:@selector(toggleSectionTopHosts)
-                                                                      target:self];
-        self.topHostsSectionHeader = topHostsHeader;
-        [detailsSubmenu addItem:topHostsHeader];
-
-            if (self.sectionTopHostsExpanded) {
-                if (stats.topHosts.count == 0) {
-                    NSMenuItem *emptyItem = [self styledStatItemWithLabel:@"No hosts captured yet"
-                                                                   value:@""
-                                                                   color:[NSColor secondaryLabelColor]];
-                    [detailsSubmenu addItem:emptyItem];
-                } else {
-                    NSInteger count = MIN(config.maxTopHostsToShow, stats.topHosts.count);
-                    for (NSInteger i = 0; i < count; i++) {
-                        HostTraffic *host = stats.topHosts[i];
-                        NSString *hostName = host.hostname.length > 0 ? host.hostname : @"";
-                        NSString *hostDisplay = hostName.length > 0 ? [NSString stringWithFormat:@"%@ (%@)", hostName, host.address] : host.address;
-                        NSString *bytesStr = [SNBByteFormatter stringFromBytes:host.bytes];
-                        NSMenuItem *hostItem = [self styledStatItemWithLabel:hostDisplay
-                                                                       value:bytesStr
-                                                                       color:[NSColor labelColor]];
-                        [detailsSubmenu addItem:hostItem];
-                    }
-                }
-            }
-
-        NSMenuItem *hostsTerminator = [NSMenuItem separatorItem];
-        self.topHostsSectionSeparator = hostsTerminator;
-        [detailsSubmenu addItem:hostsTerminator];
-    } else {
-        self.topHostsSectionHeader = nil;
-        self.topHostsSectionSeparator = nil;
-    }
-
-    if (self.showTopConnections) {
-        if (!self.topHostsSectionHeader) {
-            [detailsSubmenu addItem:[NSMenuItem separatorItem]];
-        }
-        NSString *topConnectionsTitle = [NSString stringWithFormat:@"TOP %lu CONNECTIONS by Traffic",
-                                         (unsigned long)self.configuration.maxTopConnectionsToShow];
-        NSMenuItem *topConnectionsHeader = [self collapsibleSectionHeaderWithTitle:topConnectionsTitle
-                                                                        expanded:self.sectionTopConnectionsExpanded
-                                                                          action:@selector(toggleSectionTopConnections)
-                                                                          target:self];
-        self.topConnectionsSectionHeader = topConnectionsHeader;
-        [detailsSubmenu addItem:topConnectionsHeader];
-
-        if (self.sectionTopConnectionsExpanded) {
-            if (stats.topConnections.count == 0) {
-                NSMenuItem *emptyItem = [self styledStatItemWithLabel:@"No connections captured yet"
-                                                               value:@""
-                                                               color:[NSColor secondaryLabelColor]];
-                [detailsSubmenu addItem:emptyItem];
-            } else {
-                NSInteger count = MIN(config.maxTopConnectionsToShow, stats.topConnections.count);
-                for (NSInteger i = 0; i < count; i++) {
-                    ConnectionTraffic *connection = stats.topConnections[i];
-                    // Show direction indicators (↓ incoming, ↑ outgoing)
-                    NSString *inStr = [SNBByteFormatter stringFromBytes:connection.incomingBytes];
-                    NSString *outStr = [SNBByteFormatter stringFromBytes:connection.outgoingBytes];
-                    NSString *bytesStr = [NSString stringWithFormat:@"↓%@  ↑%@", inStr, outStr];
-                    NSString *connectionLabel = [NSString stringWithFormat:@"%@:%ld → %@:%ld",
-                                                 connection.sourceAddress,
-                                                 (long)connection.sourcePort,
-                                                 connection.destinationAddress,
-                                                 (long)connection.destinationPort];
-                    NSMenuItem *connectionItem = [self styledStatItemWithLabel:connectionLabel
-                                                                          value:bytesStr
-                                                                          color:[NSColor labelColor]];
-                    [detailsSubmenu addItem:connectionItem];
-                }
-            }
-        }
-
-        NSMenuItem *connectionsTerminator = [NSMenuItem separatorItem];
-        self.topConnectionsSectionSeparator = connectionsTerminator;
-        [detailsSubmenu addItem:connectionsTerminator];
-    } else {
-        self.topConnectionsSectionHeader = nil;
-        self.topConnectionsSectionSeparator = nil;
-    }
-
-    if (self.showProcessActivity) {
-        [self appendProcessActivitySectionWithSummaries:stats.processSummaries detailsMenu:detailsSubmenu];
-    } else {
-        self.processActivityHeader = nil;
-        self.processActivitySeparator = nil;
-        self.processActivityItems = [NSMutableArray array];
-    }
-
-    if (assetMonitorEnabled && networkAssets.count > 0) {
-        if (!self.topConnectionsSectionSeparator) {
-            [detailsSubmenu addItem:[NSMenuItem separatorItem]];
-        }
-        NSString *networkDevicesTitle = @"NETWORK DEVICES";
-        if (self.selectedDeviceDisplayName.length > 0) {
-            networkDevicesTitle = [NSString stringWithFormat:@"NETWORK DEVICES (%@)", self.selectedDeviceDisplayName];
-        }
-        [detailsSubmenu addItem:[self collapsibleSectionHeaderWithTitle:networkDevicesTitle
-                                                                expanded:self.sectionNetworkAssetsExpanded
-                                                                  action:@selector(toggleSectionNetworkAssets)
-                                                                  target:self]];
-
-        if (self.sectionNetworkAssetsExpanded) {
-            NSSet<NSString *> *localIPs = SNBLocalIPAddresses();
-            NSUInteger limit = MIN(10, networkAssets.count);
-            for (NSUInteger i = 0; i < limit; i++) {
-                SNBNetworkAsset *asset = networkAssets[i];
-
-                // Build display name with hostname and vendor
-                NSString *line;
-                BOOL isLocal = [localIPs containsObject:asset.ipAddress];
-                NSString *suffix = isLocal ? @" (This Mac)" : @"";
-
-                if (asset.hostname.length > 0 && asset.vendor.length > 0) {
-                    // Show: hostname (vendor) - IP
-                    line = [NSString stringWithFormat:@"  %@ (%@) - %@%@",
-                           asset.hostname, asset.vendor, asset.ipAddress, suffix];
-                } else if (asset.hostname.length > 0) {
-                    // Show: hostname - IP
-                    line = [NSString stringWithFormat:@"  %@ - %@%@",
-                           asset.hostname, asset.ipAddress, suffix];
-                } else if (asset.vendor.length > 0) {
-                    // Show: vendor - IP
-                    line = [NSString stringWithFormat:@"  %@ - %@%@",
-                           asset.vendor, asset.ipAddress, suffix];
-                } else {
-                    // Show: IP only (no duplicate)
-                    line = [NSString stringWithFormat:@"  %@%@", asset.ipAddress, suffix];
-                }
-                NSMenuItem *assetItem = [[NSMenuItem alloc] initWithTitle:line action:nil keyEquivalent:@""];
-                assetItem.enabled = NO;
-                [detailsSubmenu addItem:assetItem];
-            }
-        }
-    }
-
-    if (threatIntelEnabled && threatIntelStatusMessage.length > 0 &&
-        (threatIntelResults == nil || threatIntelResults.count == 0)) {
-        [detailsSubmenu addItem:[NSMenuItem separatorItem]];
-        NSMenuItem *threatTitle = [[NSMenuItem alloc] initWithTitle:@"THREAT INTELLIGENCE" action:nil keyEquivalent:@""];
-        threatTitle.enabled = NO;
-        [detailsSubmenu addItem:threatTitle];
-
-        NSMenuItem *statusItem = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"  %@", threatIntelStatusMessage]
-                                                            action:nil
-                                                     keyEquivalent:@""];
-        statusItem.enabled = NO;
-        [detailsSubmenu addItem:statusItem];
-    } else if (threatIntelEnabled && threatIntelResults.count > 0) {
-        // Build set of active destination IPs
-        // Note: The old THREAT INTELLIGENCE display has been removed.
-        // See the new "ACTIVE UNCLASSIFIED" section in the main Visualization menu
-        // for the enhanced severity-based threat display.
-
-        NSArray<NSDictionary *> *maliciousConnections = [self maliciousConnectionsFromStats:stats
-                                                                        threatIntelResults:threatIntelResults];
-        if (maliciousConnections.count > 0) {
-            [detailsSubmenu addItem:[NSMenuItem separatorItem]];
-            NSMenuItem *maliciousTitle = [[NSMenuItem alloc] initWithTitle:@"SUSPICIOUS NETWORK ACTIVITY (UNCONFIRMED)"
-                                                                    action:nil
-                                                             keyEquivalent:@""];
-            maliciousTitle.enabled = NO;
-            self.maliciousConnectionsHeader = maliciousTitle;
-            [detailsSubmenu addItem:maliciousTitle];
-
-            NSArray<NSMenuItem *> *maliciousItems = [self menuItemsForMaliciousConnectionsSectionWithEntries:maliciousConnections];
-            for (NSMenuItem *item in maliciousItems) {
-                [detailsSubmenu addItem:item];
-            }
-
-            NSMenuItem *maliciousSeparator = [NSMenuItem separatorItem];
-            self.maliciousConnectionsSeparator = maliciousSeparator;
-            [detailsSubmenu addItem:maliciousSeparator];
-        } else {
-            self.maliciousConnectionsHeader = nil;
-            self.maliciousConnectionsSeparator = nil;
-        }
-
-        if (cacheStats && self.debugEnabled) {
-            [detailsSubmenu addItem:[NSMenuItem separatorItem]];
-            NSString *sizeStr = [NSString stringWithFormat:@"%@", cacheStats[@"size"]];
-            NSString *hitRateStr = [NSString stringWithFormat:@"%.1f%%", [cacheStats[@"hitRate"] doubleValue] * 100];
-            NSString *statsStr = [NSString stringWithFormat:@"Cache: %@ entries - %@ hit rate", sizeStr, hitRateStr];
-
-            NSMenuItem *statsItem = [[NSMenuItem alloc] initWithTitle:statsStr action:nil keyEquivalent:@""];
-            statsItem.enabled = NO;
-            [detailsSubmenu addItem:statsItem];
-        }
-    }
-
-    [self appendServiceHealthSectionToDetailsMenu:detailsSubmenu];
 }
 
 #pragma mark - Expandable Section Toggles
@@ -3388,7 +2543,7 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
     SNBLogUIDebug("Toggled top hosts section: %d", self.sectionTopHostsExpanded);
 
     // Fix 4: Use incremental refresh if menu structure exists, otherwise request full rebuild
-    if (self.lastTrafficStats && self.topHostsSectionHeader) {
+    if (self.lastTrafficStats && self.topHostsSectionBuilder.headerItem) {
         [self refreshTopHostsSectionWithStats:self.lastTrafficStats];
     } else {
         [self requestFullVisualizationRefresh];
@@ -3438,7 +2593,9 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
     // (full rebuild is skipped when menu is open to keep it stable)
     if (self.lastTrafficStats) {
         // Recalculate host color map based on new selection state
-        [self updateProcessHighlightColorsWithSummaries:self.lastTrafficStats.processSummaries ?: @[]];
+        [self.dataCache hostColorMapForStats:self.lastTrafficStats
+                            selectedSourceIP:self.selectedSourceIP
+                       selectedDestinationIP:self.selectedDestinationIP];
 
         SNBLogUIDebug("Calling refreshTopHostsSection...");
         [self refreshTopHostsSectionWithStats:self.lastTrafficStats];
@@ -3463,7 +2620,9 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
     // Directly refresh sections to remove highlighting
     if (self.lastTrafficStats) {
         // Recalculate host color map now that selection is cleared
-        [self updateProcessHighlightColorsWithSummaries:self.lastTrafficStats.processSummaries ?: @[]];
+        [self.dataCache hostColorMapForStats:self.lastTrafficStats
+                            selectedSourceIP:self.selectedSourceIP
+                       selectedDestinationIP:self.selectedDestinationIP];
 
         [self refreshTopHostsSectionWithStats:self.lastTrafficStats];
         [self refreshTopConnectionsSectionWithStats:self.lastTrafficStats];

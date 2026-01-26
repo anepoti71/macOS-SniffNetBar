@@ -39,7 +39,7 @@ PROJECT_INCLUDES = -I. -ICore -IConfig -IModels -IBehaviorModel -INetwork -IThre
 HELPER_INCLUDES = -I../SniffNetBar -I../SniffNetBar/Models -I../SniffNetBar/Network -I../SniffNetBar/Utils -I../SniffNetBar/XPC -I../SniffNetBar/Config
 
 # Source files (organized by domain)
-CORE_SOURCES = Core/main.m Core/AppDelegate.m Core/AppCoordinator.m \
+CORE_SOURCES = Core/main.m Core/AppDelegate.m Core/AppCoordinator.m Core/SNBStatusBarManager.m \
                Core/AnomalyExplainabilityCoordinator.m
 CONFIG_SOURCES = Config/ConfigurationManager.m Config/KeychainManager.m Config/UserDefaultsKeys.m
 MODEL_SOURCES = Models/PacketInfo.m Models/TrafficStatistics.m Models/StatisticsHistory.m \
@@ -68,12 +68,12 @@ THREATINTEL_SOURCES = ThreatIntel/ThreatIntelModels.m \
                       ThreatIntel/Providers/AbuseIPDBProvider.m \
                       ThreatIntel/Providers/GreyNoiseProvider.m \
                       ThreatIntel/Providers/ShodanProvider.m
-UI_SOURCES = UI/MapMenuView.m UI/MenuBuilder.m UI/MenuBuilder+ThreatDisplay.m UI/TrafficGraphView.m
+UI_SOURCES = UI/MapMenuView.m UI/MenuBuilder.m UI/MenuBuilder+ThreatDisplay.m UI/TrafficGraphView.m UI/SNBMapRenderer.m UI/SNBMenuDataCache.m UI/SNBMenuTopHostsSectionBuilder.m UI/SNBMenuAssetsSectionBuilder.m UI/SNBMenuThreatsSectionBuilder.m UI/SNBMenuDetailsSectionBuilder.m
 PROMOTION_SOURCES = PromotionAgent/SNBPromotionAgent.m PromotionAgent/SNBPromotionPolicy.m \
                     PromotionAgent/SNBPromotionDecision.m PromotionAgent/SNBPromotionCandidate.m \
                     PromotionAgent/SNBPromotionEvaluator.m PromotionAgent/SNBPromotionLog.m \
                     PromotionAgent/SNBOllamaClient.m
-UTIL_SOURCES = Utils/ByteFormatter.m Utils/ExpiringCache.m Utils/IPAddressUtilities.m Utils/Logger.m Utils/ProcessLookup.m Utils/ProcessLookup_lsof.m Utils/ProcessLookup_Native.m Utils/SNBSocketPIDMap.m Utils/SMAppServiceHelper.m Utils/SNBPrivilegedHelperClient.m Utils/SNBLocationStore.m Utils/SNBTimerCoordinator.m UI/SNBBadgeRegistry.m
+UTIL_SOURCES = Utils/ByteFormatter.m Utils/ExpiringCache.m Utils/IPAddressUtilities.m Utils/Logger.m Utils/ProcessLookup.m Utils/ProcessLookup_lsof.m Utils/ProcessLookup_Native.m Utils/SNBSocketPIDMap.m Utils/SMAppServiceHelper.m Utils/SNBPrivilegedHelperClient.m Utils/SNBLocationStore.m Utils/SNBTimerCoordinator.m Utils/SNBGeoLocationService.m UI/SNBBadgeRegistry.m
 XPC_SOURCES = XPC/PacketInfo+Serialization.m XPC/ProcessInfo+Serialization.m XPC/NetworkDevice+Serialization.m
 
 # Test sources

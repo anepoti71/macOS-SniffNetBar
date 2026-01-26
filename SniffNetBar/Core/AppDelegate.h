@@ -8,10 +8,11 @@
 #import <Cocoa/Cocoa.h>
 
 @class AppCoordinator;
+@class SNBStatusBarManager;
 
 @interface AppDelegate : NSObject <NSApplicationDelegate, NSMenuDelegate>
 
-@property (nonatomic, strong) NSStatusItem *statusItem;
+@property (nonatomic, strong) SNBStatusBarManager *statusBarManager;
 @property (nonatomic, strong) NSMenu *statusMenu;
 @property (nonatomic, strong) AppCoordinator *coordinator;
 

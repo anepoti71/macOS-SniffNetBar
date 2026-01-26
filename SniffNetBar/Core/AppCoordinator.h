@@ -14,6 +14,7 @@
 @class ThreatIntelCoordinator;
 @class TrafficStatistics;
 @class NetworkDevice;
+@class SNBStatusBarManager;
 
 @interface AppCoordinator : NSObject
 
@@ -23,8 +24,8 @@
 @property (nonatomic, strong, readonly) ThreatIntelCoordinator *threatIntelCoordinator;
 @property (nonatomic, strong, readonly) ConfigurationManager *configuration;
 
-- (instancetype)initWithStatusItem:(NSStatusItem *)statusItem
-                         statusMenu:(NSMenu *)statusMenu;
+- (instancetype)initWithStatusBarManager:(SNBStatusBarManager *)statusBarManager
+                              statusMenu:(NSMenu *)statusMenu;
 - (void)start;
 - (void)stop;
 - (void)updateMenu;

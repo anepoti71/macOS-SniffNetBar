@@ -12,6 +12,7 @@
 @class TIEnrichmentResponse;
 @class SNBNetworkAsset;
 @class SNBPromotionDecision;
+@class SNBStatusBarManager;
 
 @protocol MenuBuilderDelegate <NSObject>
 - (void)menuBuilderNeedsVisualizationRefresh:(id)sender;
@@ -62,7 +63,7 @@
 @property (nonatomic, assign) BOOL sectionProcessActivityExpanded;
 
 - (instancetype)initWithMenu:(NSMenu *)menu
-                  statusItem:(NSStatusItem *)statusItem
+           statusBarManager:(SNBStatusBarManager *)statusBarManager
                configuration:(ConfigurationManager *)configuration;
 - (void)updateStatusWithStats:(TrafficStats *)stats selectedDevice:(NetworkDevice *)selectedDevice;
 - (void)updateMenuWithStats:(TrafficStats *)stats

@@ -6,24 +6,21 @@
 //
 
 #import "MapMenuView.h"
-#import "ByteFormatter.h"
 #import "ConfigurationManager.h"
-#import "ExpiringCache.h"
 #import "IPAddressUtilities.h"
 #import "UserDefaultsKeys.h"
-#import "SNBLocationStore.h"
 #import "SNBBadgeRegistry.h"
 #import "SNBTimerCoordinator.h"
 #import "ThreatIntelModels.h"
 #import "TrustedIPStore.h"
 #import "Logger.h"
+#import "SNBGeoLocationService.h"
+#import "SNBMapRenderer.h"
 #import <WebKit/WebKit.h>
 #import <CoreLocation/CoreLocation.h>
 
 // Cache cleanup interval
 static const NSTimeInterval kCacheCleanupInterval = 300.0;  // 5 minutes
-// Failed lookups retry interval (after which failed IPs can be retried)
-static const NSTimeInterval kFailedLookupRetryInterval = 1800.0;  // 30 minutes
 // Render debounce interval to reduce UI churn
 static const NSTimeInterval kRenderDebounceInterval = 0.25;
 
@@ -36,25 +33,17 @@ static const NSTimeInterval kRenderDebounceInterval = 0.25;
 @property (nonatomic, strong) NSButton *heatMapButton;
 @property (nonatomic, strong) NSButton *legendButton;
 @property (nonatomic, strong) NSButton *filterButton;
-@property (nonatomic, strong) SNBExpiringCache<NSString *, NSDictionary *> *locationCache;
-@property (nonatomic, strong) SNBLocationStore *locationStore;
-@property (nonatomic, strong) NSMutableSet<NSString *> *inFlightLookups;
-@property (nonatomic, strong) NSMutableSet<NSString *> *failedLookups;
-@property (nonatomic, strong) NSURLSession *session;
+@property (nonatomic, strong) SNBGeoLocationService *geoService;
+@property (nonatomic, strong) SNBMapRenderer *mapRenderer;
 @property (nonatomic, copy) NSArray<ConnectionTraffic *> *lastConnections;
 @property (nonatomic, copy) NSDictionary<NSString *, TIEnrichmentResponse *> *threatIntelResults;
 @property (nonatomic, copy) NSSet<NSString *> *blockedIPs;
 @property (nonatomic, strong) SNBTrustedIPStore *trustedStore;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSDate *> *firstSeenByIP;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSDate *> *lastSeenByIP;
-@property (nonatomic, copy) NSString *publicIPAddress;
-@property (nonatomic, strong) NSValue *publicIPCoordinate;
-@property (nonatomic, assign) BOOL publicIPLookupInFlight;
 @property (nonatomic, assign) BOOL mapReady;
 @property (nonatomic, copy) NSArray<NSString *> *lastTargetIPs;
-@property (nonatomic, copy) NSSet<NSString *> *lastTargetIPSet;
 @property (nonatomic, assign) uint64_t lastConnectionsHash;
-@property (nonatomic, assign) NSUInteger locationVersion;
 @property (nonatomic, assign) NSUInteger riskVersion;
 @property (nonatomic, assign) uint64_t cachedConnectionsHash;
 @property (nonatomic, assign) NSUInteger cachedLocationVersion;
@@ -70,10 +59,7 @@ static const NSTimeInterval kRenderDebounceInterval = 0.25;
 @property (nonatomic, assign) NSUInteger lastRenderedGeneration;
 @property (nonatomic, assign) NSUInteger scheduledRenderGeneration;
 @property (nonatomic, assign) NSUInteger lastRenderSignature;
-@property (nonatomic, assign) NSUInteger failedLookupResetVersion;
-@property (nonatomic, assign) NSUInteger lastLookupAttemptVersion;
 @property (nonatomic, strong) NSDate *lastCacheCleanupTime;
-@property (nonatomic, strong) dispatch_semaphore_t geoLocationSemaphore;
 @property (nonatomic, strong) NSWindow *detachedWindow;
 @property (nonatomic, strong) MapMenuView *detachedMapView;
 @property (nonatomic, assign) BOOL isDetachedInstance;
@@ -83,26 +69,9 @@ static const NSTimeInterval kRenderDebounceInterval = 0.25;
 @property (nonatomic, strong) id clickEventMonitor;
 // Periodic cleanup timer
 @property (nonatomic, copy) SNBTimerID cleanupTimerID;
-// Track when failed lookups can be retried
-@property (nonatomic, strong) NSDate *lastFailedLookupsReset;
 @end
 
 @implementation MapMenuView
-
-static NSString *SNBLocationStoreDirectory(void) {
-    NSArray<NSString *> *paths = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES);
-    if (paths.count == 0) {
-        return NSTemporaryDirectory();
-    }
-    NSString *dir = [paths.firstObject stringByAppendingPathComponent:@"SniffNetBar"];
-    NSError *error = nil;
-    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:&error];
-    if (error) {
-        SNBLogUIDebug("Unable to create App Support dir: %s", error.localizedDescription.UTF8String);
-        return NSTemporaryDirectory();
-    }
-    return dir;
-}
 
 static inline uint64_t SNBHashCombine(uint64_t hash, uint64_t value) {
     hash ^= value;
@@ -165,32 +134,19 @@ static uint64_t SNBHashConnectionTuple(ConnectionTraffic *connection) {
         _webView.wantsLayer = YES;
         [self addSubview:_webView];
 
-        _locationCache = [[SNBExpiringCache alloc] initWithMaxSize:[ConfigurationManager sharedManager].maxLocationCacheSize
-                                                expirationInterval:[ConfigurationManager sharedManager].locationCacheExpirationTime];
-        _inFlightLookups = [NSMutableSet set];
-        _failedLookups = [NSMutableSet set];
+        _mapRenderer = [[SNBMapRenderer alloc] init];
         _trustedStore = [SNBTrustedIPStore sharedStore];
         _firstSeenByIP = [NSMutableDictionary dictionary];
         _lastSeenByIP = [NSMutableDictionary dictionary];
         _blockedIPs = [NSSet set];
         _threatIntelResults = @{};
-        NSURLSessionConfiguration *sessionConfig = [NSURLSessionConfiguration ephemeralSessionConfiguration];
-        sessionConfig.URLCache = nil;
-        sessionConfig.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
-        _session = [NSURLSession sessionWithConfiguration:sessionConfig];
         _renderQueue = dispatch_queue_create("com.sniffnetbar.map.render", DISPATCH_QUEUE_SERIAL);
-        NSUInteger semaphoreLimit = [ConfigurationManager sharedManager].geoLocationSemaphoreLimit;
-        _geoLocationSemaphore = dispatch_semaphore_create((long)semaphoreLimit);
         _isDetachedInstance = NO;
 
         NSString *savedProvider = [[NSUserDefaults standardUserDefaults] stringForKey:SNBUserDefaultsKeyMapProvider];
         NSString *defaultProvider = [ConfigurationManager sharedManager].defaultMapProvider;
         _providerName = savedProvider.length > 0 ? savedProvider : defaultProvider;
-
-        NSString *supportDir = SNBLocationStoreDirectory();
-        NSString *dbPath = [supportDir stringByAppendingPathComponent:@"location_cache.sqlite"];
-        _locationStore = [SNBLocationStore sharedStoreWithPath:dbPath
-                                            expirationInterval:[ConfigurationManager sharedManager].locationCacheExpirationTime];
+        _geoService = [[SNBGeoLocationService alloc] initWithProviderName:_providerName];
 
         [self loadMapHTML];
         [self updateLayout];
@@ -200,7 +156,6 @@ static uint64_t SNBHashConnectionTuple(ConnectionTraffic *connection) {
 
         // Start periodic cache cleanup timer
         [self startCacheCleanupTimer];
-        _lastFailedLookupsReset = [NSDate date];
     }
     return self;
 }
@@ -337,7 +292,6 @@ static uint64_t SNBHashConnectionTuple(ConnectionTraffic *connection) {
 
 - (void)dealloc {
     [self removeClickEventMonitor];
-    [_session invalidateAndCancel];
     if (self.detachedWindow) {
         [self.detachedWindow close];
         self.detachedWindow = nil;
@@ -412,28 +366,7 @@ static uint64_t SNBHashConnectionTuple(ConnectionTraffic *connection) {
 }
 
 - (void)performCacheCleanup {
-    // Clean up expired entries from in-memory cache
-    NSUInteger expiredCount = [self.locationCache cleanupAndReturnExpiredCount];
-    if (expiredCount > 0) {
-        SNBLogUIDebug("MapMenuView: Cleaned up %lu expired location cache entries", (unsigned long)expiredCount);
-    }
-
-    // Reset failed lookups periodically to allow retry of transient failures
-    NSTimeInterval timeSinceReset = -[self.lastFailedLookupsReset timeIntervalSinceNow];
-    if (timeSinceReset > kFailedLookupRetryInterval) {
-        NSUInteger failedCount = self.failedLookups.count;
-        if (failedCount > 0) {
-            [self.failedLookups removeAllObjects];
-            self.lastFailedLookupsReset = [NSDate date];
-            self.failedLookupResetVersion += 1;
-            SNBLogUIDebug("MapMenuView: Reset %lu failed lookups (retry after %.0f minutes)",
-                         (unsigned long)failedCount, kFailedLookupRetryInterval / 60.0);
-        }
-    }
-
-    // Clean up expired entries from persistent SQLite store
-    [self.locationStore cleanupExpiredEntries];
-
+    [self.geoService performCacheCleanup];
     self.lastCacheCleanupTime = [NSDate date];
 }
 
@@ -442,8 +375,7 @@ static uint64_t SNBHashConnectionTuple(ConnectionTraffic *connection) {
         return;
     }
     _providerName = [providerName copy];
-    [self.failedLookups removeAllObjects];
-    [self.inFlightLookups removeAllObjects];
+    self.geoService.providerName = _providerName;
 }
 
 - (void)viewDidMoveToWindow {
@@ -606,16 +538,16 @@ static uint64_t SNBHashConnectionTuple(ConnectionTraffic *connection) {
     NSDate *now = [NSDate date];
     if (!self.lastCacheCleanupTime || [now timeIntervalSinceDate:self.lastCacheCleanupTime] > 5.0) {
         self.lastCacheCleanupTime = now;
-        NSUInteger expiredCount = [self.locationCache cleanupAndReturnExpiredCount];
-        [self.locationStore cleanupExpiredEntries];
-        if (expiredCount > 0) {
-            SNBLogUIDebug(": cleaned up %lu expired location cache entries",
-                   (unsigned long)expiredCount);
-        }
+        [self.geoService performCacheCleanup];
     }
     SNBLogUIDebug(" update: %lu connections", (unsigned long)connections.count);
-    [self updatePublicIPLocationIfNeeded];
-    if (!connectionsChanged && !riskStateChanged && self.lastTargetIPSet) {
+    [self.geoService updatePublicIPIfNeededWithCompletion:^(BOOL updated) {
+        if (updated) {
+            [self markRenderDataDirty];
+            [self refreshMarkers];
+        }
+    }];
+    if (!connectionsChanged && !riskStateChanged && self.lastTargetIPs.count > 0) {
         return;
     }
     if (connections.count == 0) {
@@ -648,120 +580,26 @@ static uint64_t SNBHashConnectionTuple(ConnectionTraffic *connection) {
             SNBLogUIDebug(" skip local IP: %s", ip.UTF8String);
         }
     }
-    NSSet<NSString *> *previousTargetSet = self.lastTargetIPSet ?: [NSSet set];
-    NSSet<NSString *> *newTargetSet = [targetIps copy];
-    BOOL targetIpsChanged = ![newTargetSet isEqualToSet:previousTargetSet];
-    self.lastTargetIPSet = newTargetSet;
+    NSSet<NSString *> *targetIPSet = [targetIps copy];
     self.lastTargetIPs = [targetIps.allObjects sortedArrayUsingSelector:@selector(compare:)];
     
     SNBLogUIDebug(" target IPs: %s", targetIps.description.UTF8String);
     BOOL signatureChanged = [self updateRenderSignatureWithConnections:connections
                                                              targetIPs:self.lastTargetIPs];
     
-    BOOL canLookup = YES;
-    if ([self.providerName isEqualToString:@"custom"]) {
-        NSString *template = [[NSUserDefaults standardUserDefaults] stringForKey:SNBUserDefaultsKeyMapProviderURLTemplate];
-        if (template.length == 0) {
-            canLookup = NO;
+    [self.geoService resolveTargetIPs:targetIPSet completion:^(NSString *ip, CLLocationCoordinate2D coord, BOOL success) {
+        if (!success) {
+            return;
         }
-    }
-    
-    NSMutableSet<NSString *> *lookupTargets = [NSMutableSet setWithSet:newTargetSet];
-    [lookupTargets minusSet:previousTargetSet];
-    if (self.lastLookupAttemptVersion != self.failedLookupResetVersion) {
-        [lookupTargets unionSet:newTargetSet];
-        self.lastLookupAttemptVersion = self.failedLookupResetVersion;
-    }
-    for (NSString *ip in lookupTargets) {
-        NSDictionary *cached = [self.locationCache objectForKey:ip];
-        if (!cached) {
-            cached = [self.locationStore locationForIP:ip];
-            if (cached) {
-                [self.locationCache setObject:cached forKey:ip];
-            }
-        }
-        if (cached) {
-            continue;
-        }
-        if (!canLookup || [self.inFlightLookups containsObject:ip] || [self.failedLookups containsObject:ip]) {
-            continue;
-        }
-        
-        [self.inFlightLookups addObject:ip];
-        [self fetchLocationForIP:ip completion:^(CLLocationCoordinate2D coord, BOOL success) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self.inFlightLookups removeObject:ip];
-                if (!success) {
-                    [self.failedLookups addObject:ip];
-                    return;
-                }
-                SNBLogUIDebug(" pin ready for %s (%f, %f)", ip.UTF8String, coord.latitude, coord.longitude);
-                self.locationVersion += 1;
-                [self markRenderDataDirty];
-                [self refreshMarkers];
-            });
-        }];
-    }
+        SNBLogUIDebug(" pin ready for %s (%f, %f)", ip.UTF8String, coord.latitude, coord.longitude);
+        [self markRenderDataDirty];
+        [self refreshMarkers];
+    }];
     
     if (signatureChanged) {
         [self markRenderDataDirty];
         [self refreshMarkers];
     }
-}
-
-- (void)updatePublicIPLocationIfNeeded {
-    if (self.publicIPLookupInFlight || self.publicIPAddress.length > 0) {
-        return;
-    }
-    
-    self.publicIPLookupInFlight = YES;
-    NSURL *url = [NSURL URLWithString:@"https://api.ipify.org?format=json"];
-    if (!url) {
-        self.publicIPLookupInFlight = NO;
-        return;
-    }
-    
-    SNBLogUIDebug(" public IP lookup via %s", url.absoluteString.UTF8String);
-    NSURLSessionDataTask *task = [self.session dataTaskWithURL:url completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        if (error || !data) {
-            SNBLogUIDebug(" public IP lookup failed: %s", error.localizedDescription.UTF8String);
-            self.publicIPLookupInFlight = NO;
-            return;
-        }
-        
-        NSError *jsonError;
-        id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:&jsonError];
-        if (jsonError || ![json isKindOfClass:[NSDictionary class]]) {
-            SNBLogUIDebug(" public IP JSON error: %s", jsonError.localizedDescription.UTF8String);
-            self.publicIPLookupInFlight = NO;
-            return;
-        }
-        
-        NSString *ip = json[@"ip"];
-        if (ip.length == 0) {
-            SNBLogUIDebug(" public IP missing in response");
-            self.publicIPLookupInFlight = NO;
-            return;
-        }
-        
-        SNBLogUIDebug(" public IP: %s", ip.UTF8String);
-        self.publicIPAddress = ip;
-        [self fetchLocationForIP:ip completion:^(CLLocationCoordinate2D coord, BOOL success) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                self.publicIPLookupInFlight = NO;
-                if (!success) {
-                    SNBLogUIDebug(" public IP geolocation failed: %s", ip.UTF8String);
-                    return;
-                }
-                self.publicIPCoordinate = [NSValue valueWithBytes:&coord objCType:@encode(CLLocationCoordinate2D)];
-                SNBLogUIDebug(" public IP located: %s => (%f, %f)", ip.UTF8String, coord.latitude, coord.longitude);
-                self.locationVersion += 1;
-                [self markRenderDataDirty];
-                [self refreshMarkers];
-            });
-        }];
-    }];
-    [task resume];
 }
 
 - (void)markRenderDataDirty {
@@ -867,15 +705,15 @@ static uint64_t SNBHashConnectionTuple(ConnectionTraffic *connection) {
     NSUInteger generation = self.renderGeneration;
     NSArray<NSString *> *targetIPs = [self.lastTargetIPs copy] ?: @[];
     NSArray<ConnectionTraffic *> *connections = [self.lastConnections copy] ?: @[];
-    NSString *publicIP = [self.publicIPAddress copy];
-    NSValue *publicCoordValue = self.publicIPCoordinate;
+    NSString *publicIP = [self.geoService.publicIPAddress copy];
+    NSValue *publicCoordValue = self.geoService.publicIPCoordinate;
     ConfigurationManager *config = [ConfigurationManager sharedManager];
     NSInteger maxLines = MIN(config.maxConnectionLinesToShow, connections.count);
 
     BOOL canReuseJSON = (self.cachedPointsJSON.length > 0 &&
                          self.cachedLinesJSON.length > 0 &&
                          self.cachedConnectionsHash == self.lastConnectionsHash &&
-                         self.cachedLocationVersion == self.locationVersion &&
+                         self.cachedLocationVersion == self.geoService.locationVersion &&
                          self.cachedRiskVersion == self.riskVersion &&
                          self.cachedMaxLines == maxLines);
     if (canReuseJSON) {
@@ -895,13 +733,11 @@ static uint64_t SNBHashConnectionTuple(ConnectionTraffic *connection) {
         return;
     }
 
-    NSMutableDictionary<NSString *, NSDictionary *> *locationByIP = [NSMutableDictionary dictionary];
-    for (NSString *ip in targetIPs) {
-        NSDictionary *value = [self.locationCache objectForKey:ip];
-        if (value) {
-            locationByIP[ip] = value;
-        }
+    CLLocationCoordinate2D publicCoord = kCLLocationCoordinate2DInvalid;
+    if (publicCoordValue) {
+        [publicCoordValue getValue:&publicCoord];
     }
+    NSMutableDictionary<NSString *, NSDictionary *> *locationByIP = [[self.geoService cachedLocationsForIPs:targetIPs] mutableCopy];
 
     NSMutableDictionary<NSString *, NSDictionary *> *badgeInfoByIP = [NSMutableDictionary dictionary];
     for (ConnectionTraffic *connection in connections) {
@@ -941,15 +777,19 @@ static uint64_t SNBHashConnectionTuple(ConnectionTraffic *connection) {
     for (NSInteger i = 0; i < maxLines; i++) {
         ConnectionTraffic *connection = connections[i];
         if (connection.sourceAddress.length > 0 && !locationByIP[connection.sourceAddress]) {
-            NSDictionary *value = [self.locationCache objectForKey:connection.sourceAddress];
+            NSDictionary *value = [self.geoService locationForIP:connection.sourceAddress];
             if (value) {
                 locationByIP[connection.sourceAddress] = value;
+            } else if (![self shouldGeolocateIPAddress:connection.sourceAddress] && CLLocationCoordinate2DIsValid(publicCoord)) {
+                locationByIP[connection.sourceAddress] = @{@"lat": @(publicCoord.latitude), @"lon": @(publicCoord.longitude)};
             }
         }
         if (connection.destinationAddress.length > 0 && !locationByIP[connection.destinationAddress]) {
-            NSDictionary *value = [self.locationCache objectForKey:connection.destinationAddress];
+            NSDictionary *value = [self.geoService locationForIP:connection.destinationAddress];
             if (value) {
                 locationByIP[connection.destinationAddress] = value;
+            } else if (![self shouldGeolocateIPAddress:connection.destinationAddress] && CLLocationCoordinate2DIsValid(publicCoord)) {
+                locationByIP[connection.destinationAddress] = @{@"lat": @(publicCoord.latitude), @"lon": @(publicCoord.longitude)};
             }
         }
     }
@@ -961,205 +801,31 @@ static uint64_t SNBHashConnectionTuple(ConnectionTraffic *connection) {
             return;
         }
 
-        NSCalendar *calendar = [NSCalendar currentCalendar];
-        NSDate *startOfDay = [calendar startOfDayForDate:[NSDate date]];
-        NSMutableDictionary<NSString *, NSMutableArray<NSDictionary *> *> *pointsByCoord = [NSMutableDictionary dictionary];
-        for (NSString *ip in targetIPs) {
-            NSDictionary *value = locationByIP[ip];
-            if (!value) {
-                continue;
-            }
-            CLLocationCoordinate2D coord;
-            coord.latitude = [value[@"lat"] doubleValue];
-            coord.longitude = [value[@"lon"] doubleValue];
-            if (!CLLocationCoordinate2DIsValid(coord)) {
-                continue;
-            }
-            NSString *name = value[@"name"];
-            NSString *isp = value[@"isp"];
-            NSString *locationPart = name.length > 0 ? [NSString stringWithFormat:@"%@ — %@", ip, name] : ip;
-            NSMutableDictionary *payload = [NSMutableDictionary dictionary];
-            payload[@"lat"] = @(coord.latitude);
-            payload[@"lon"] = @(coord.longitude);
-            payload[@"ip"] = ip;
-            payload[@"title"] = isp.length > 0 ? [NSString stringWithFormat:@"%@\nISP: %@", locationPart, isp] : locationPart;
-            payload[@"name"] = name ?: @"";
-            payload[@"isp"] = isp ?: @"";
-            payload[@"country"] = value[@"country"] ?: @"";
-            payload[@"asn"] = value[@"asn"] ?: @"";
-            NSArray<NSString *> *processes = [[processesByIP[ip] allObjects] sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)] ?: @[];
-            payload[@"processes"] = processes;
-            payload[@"connectionCount"] = connectionCountsByIP[ip] ?: @0;
-            NSDate *firstSeen = strongSelf.firstSeenByIP[ip];
-            NSDate *lastSeen = strongSelf.lastSeenByIP[ip];
-            payload[@"firstSeen"] = firstSeen ? @([firstSeen timeIntervalSince1970]) : @0;
-            payload[@"lastSeen"] = lastSeen ? @([lastSeen timeIntervalSince1970]) : @0;
-            payload[@"riskState"] = [strongSelf riskStateForIP:ip] ?: @"Observed";
-            BOOL isNewToday = firstSeen && ([firstSeen compare:startOfDay] != NSOrderedAscending);
-            payload[@"isNewToday"] = @(isNewToday);
-
-            // Group by 3 decimal places (~111m precision) to cluster nearby IPs
-            NSString *coordKey = [NSString stringWithFormat:@"%.3f,%.3f", coord.latitude, coord.longitude];
-            NSMutableArray<NSDictionary *> *group = pointsByCoord[coordKey];
-            if (!group) {
-                group = [NSMutableArray array];
-                pointsByCoord[coordKey] = group;
-            }
-            [group addObject:payload];
+        SNBMapRenderResult *renderResult = [strongSelf.mapRenderer renderWithTargetIPs:targetIPs
+                                                                           connections:connections
+                                                                          locationByIP:locationByIP
+                                                                         badgeInfoByIP:badgeInfoByIP
+                                                                        processesByIP:processesByIP
+                                                                 connectionCountsByIP:connectionCountsByIP
+                                                                        firstSeenByIP:strongSelf.firstSeenByIP
+                                                                         lastSeenByIP:strongSelf.lastSeenByIP
+                                                                              publicIP:publicIP
+                                                                            publicCoord:publicCoord
+                                                                        riskStateForIP:^NSString * _Nonnull(NSString *ip) {
+            return [strongSelf riskStateForIP:ip] ?: @"Observed";
         }
-
-        NSMutableArray<NSDictionary *> *points = [NSMutableArray array];
-        [pointsByCoord enumerateKeysAndObjectsUsingBlock:^(NSString *key, NSArray<NSDictionary *> *group, BOOL *stop) {
-            NSDictionary *firstPoint = group.firstObject;
-            NSMutableDictionary *pointData = [NSMutableDictionary dictionary];
-            pointData[@"lat"] = firstPoint[@"lat"];
-            pointData[@"lon"] = firstPoint[@"lon"];
-            pointData[@"ips"] = [group valueForKey:@"ip"];
-            pointData[@"names"] = [group valueForKey:@"name"];
-            pointData[@"isps"] = [group valueForKey:@"isp"];
-            pointData[@"locationName"] = firstPoint[@"name"] ?: @"";
-            NSMutableArray<NSDictionary *> *badges = [NSMutableArray array];
-            NSMutableArray<NSDictionary *> *details = [NSMutableArray array];
-            for (NSDictionary *payload in group) {
-                NSString *ip = payload[@"ip"];
-                NSDictionary *badge = badgeInfoByIP[ip];
-                if (!badge) {
-                    NSString *label = payload[@"name"] ?: ip;
-                    NSString *icon = [[SNBBadgeRegistry sharedRegistry] badgeIconForLabel:label fallback:ip];
-                    NSColor *badgeColor = [[SNBBadgeRegistry sharedRegistry] colorForLabel:label
-                                                                 createIfMissing:YES];
-                    NSString *colorHex = [self hexStringForColor:badgeColor];
-                    badge = @{@"icon": icon ?: @"", @"color": colorHex};
-                }
-                [badges addObject:badge];
-                NSMutableDictionary *detail = [payload mutableCopy];
-                detail[@"badge"] = badge;
-                [details addObject:detail];
-            }
-            pointData[@"badgeInfos"] = badges;
-            pointData[@"ipDetails"] = details;
-            if (group.count > 1) {
-                pointData[@"isDuplicate"] = @YES;
-                pointData[@"color"] = @"#ffad60";
-            } else {
-                pointData[@"isDuplicate"] = @NO;
-            }
-            [points addObject:pointData];
-            SNBLogUIDebug("Map marker: %s @ (%f, %f) duplicates=%s",
-                          [pointData[@"ips"] description].UTF8String,
-                          [pointData[@"lat"] doubleValue],
-                          [pointData[@"lon"] doubleValue],
-                          [pointData[@"isDuplicate"] description].UTF8String);
-        }];
-
-        CLLocationCoordinate2D publicCoord = kCLLocationCoordinate2DInvalid;
-        if (publicCoordValue) {
-            [publicCoordValue getValue:&publicCoord];
-        }
-        if (publicIP.length > 0 && CLLocationCoordinate2DIsValid(publicCoord)) {
-            NSString *riskState = [strongSelf riskStateForIP:publicIP] ?: @"Observed";
-            NSDictionary *publicDetail = @{
-                @"ip": publicIP,
-                @"lat": @(publicCoord.latitude),
-                @"lon": @(publicCoord.longitude),
-                @"name": @"",
-                @"isp": @"",
-                @"country": @"",
-                @"asn": @"",
-                @"processes": @[],
-                @"connectionCount": @0,
-                @"firstSeen": @0,
-                @"lastSeen": @0,
-                @"riskState": riskState,
-                @"isNewToday": @NO,
-                @"badge": @{@"icon": @"", @"color": @"#94a3b8"}
-            };
-            [points addObject:@{@"lat": @(publicCoord.latitude),
-                                @"lon": @(publicCoord.longitude),
-                                @"title": [NSString stringWithFormat:@"Public IP: %@", publicIP],
-                                @"ips": @[publicIP],
-                                @"ipDetails": @[publicDetail],
-                                @"locationName": @"",
-                                @"isDuplicate": @NO}];
-        }
-
-        NSError *jsonError;
-        NSData *data = [NSJSONSerialization dataWithJSONObject:points options:0 error:&jsonError];
-        if (!data) {
-            SNBLogUIDebug(" JSON encode error: %s", jsonError.localizedDescription.UTF8String);
+                                                                              maxLines:maxLines];
+        if (!renderResult) {
             return;
         }
-        NSString *json = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-
-        NSMutableArray<NSDictionary *> *lines = [NSMutableArray array];
-        for (NSInteger i = 0; i < maxLines; i++) {
-            ConnectionTraffic *connection = connections[i];
-
-            NSDictionary *src = locationByIP[connection.sourceAddress];
-            BOOL srcIsLocal = ![strongSelf shouldGeolocateIPAddress:connection.sourceAddress];
-            if (!src && srcIsLocal && CLLocationCoordinate2DIsValid(publicCoord)) {
-                src = @{@"lat": @(publicCoord.latitude), @"lon": @(publicCoord.longitude)};
-            }
-
-            NSDictionary *dst = locationByIP[connection.destinationAddress];
-            BOOL dstIsLocal = ![strongSelf shouldGeolocateIPAddress:connection.destinationAddress];
-            if (!dst && dstIsLocal && CLLocationCoordinate2DIsValid(publicCoord)) {
-                dst = @{@"lat": @(publicCoord.latitude), @"lon": @(publicCoord.longitude)};
-            }
-
-            if (!src || !dst) {
-                continue;
-            }
-
-            CLLocationCoordinate2D srcCoord = CLLocationCoordinate2DMake([src[@"lat"] doubleValue], [src[@"lon"] doubleValue]);
-            CLLocationCoordinate2D dstCoord = CLLocationCoordinate2DMake([dst[@"lat"] doubleValue], [dst[@"lon"] doubleValue]);
-            if (!CLLocationCoordinate2DIsValid(srcCoord) || !CLLocationCoordinate2DIsValid(dstCoord)) {
-                continue;
-            }
-
-            NSString *lineTitle = [NSString stringWithFormat:@"%@ → %@ (%@)",
-                                   connection.sourceAddress,
-                                   connection.destinationAddress,
-                                   [SNBByteFormatter stringFromBytes:connection.bytes]];
-            [lines addObject:@{@"srcLat": @(srcCoord.latitude),
-                               @"srcLon": @(srcCoord.longitude),
-                               @"dstLat": @(dstCoord.latitude),
-                               @"dstLon": @(dstCoord.longitude),
-                               @"title": lineTitle,
-                               @"srcIP": connection.sourceAddress,
-                               @"dstIP": connection.destinationAddress}];
-            SNBLogUIDebug("Map line: %s.%ld (%s) -> %s.%ld (%s)",
-                          connection.sourceAddress.UTF8String,
-                          connection.sourcePort,
-                          [SNBByteFormatter stringFromBytes:connection.bytes].UTF8String,
-                          connection.destinationAddress.UTF8String,
-                          connection.destinationPort,
-                          [NSString stringWithFormat:@"src(%f,%f) dst(%f,%f)",
-                             srcCoord.latitude, srcCoord.longitude, dstCoord.latitude, dstCoord.longitude].UTF8String);
-        }
-        SNBLogUIDebug(": created %lu connection lines from %lu connections", (unsigned long)lines.count, (unsigned long)connections.count);
-
-        // Update the count of actually drawn connections for display synchronization
-        strongSelf.drawnConnectionCount = lines.count;
-        SNBLogUIDebug("Map draw count=%lu (capped at %ld lines)", (unsigned long)lines.count, (long)maxLines);
-
-        if (lines.count > 0) {
-            SNBLogUIDebug(": First line example: %s", [lines[0] description].UTF8String);
-        }
-
-        NSData *lineData = [NSJSONSerialization dataWithJSONObject:lines options:0 error:&jsonError];
-        if (!lineData) {
-            SNBLogUIDebug(" JSON encode error (lines): %s", jsonError.localizedDescription.UTF8String);
-            return;
-        }
-        NSString *lineJson = [[NSString alloc] initWithData:lineData encoding:NSUTF8StringEncoding];
+        strongSelf.drawnConnectionCount = renderResult.drawnConnectionCount;
         strongSelf.cachedConnectionsHash = strongSelf.lastConnectionsHash;
-        strongSelf.cachedLocationVersion = strongSelf.locationVersion;
+        strongSelf.cachedLocationVersion = strongSelf.geoService.locationVersion;
         strongSelf.cachedRiskVersion = strongSelf.riskVersion;
         strongSelf.cachedMaxLines = maxLines;
-        strongSelf.cachedPointsJSON = json;
-        strongSelf.cachedLinesJSON = lineJson;
-        NSString *script = [NSString stringWithFormat:@"window.SniffNetBar && window.SniffNetBar.setMarkers(%@, %@);", json, lineJson];
+        strongSelf.cachedPointsJSON = renderResult.pointsJSON;
+        strongSelf.cachedLinesJSON = renderResult.linesJSON;
+        NSString *script = [NSString stringWithFormat:@"window.SniffNetBar && window.SniffNetBar.setMarkers(%@, %@);", renderResult.pointsJSON, renderResult.linesJSON];
 
         dispatch_async(dispatch_get_main_queue(), ^{
             if (generation != strongSelf.renderGeneration || !strongSelf.mapReady) {
@@ -2180,170 +1846,6 @@ static uint64_t SNBHashConnectionTuple(ConnectionTraffic *connection) {
 - (BOOL)shouldGeolocateIPAddress:(NSString *)ip {
     // Use centralized validation - only geolocate public IPs
     return [IPAddressUtilities isPublicIPAddress:ip];
-}
-
-- (void)fetchLocationForIP:(NSString *)ip completion:(void (^)(CLLocationCoordinate2D, BOOL))completion {
-    // Acquire semaphore to limit concurrent requests (prevents rate limiting)
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        dispatch_semaphore_wait(self.geoLocationSemaphore, DISPATCH_TIME_FOREVER);
-
-        NSString *provider = self.providerName.length > 0 ? self.providerName : @"ipinfo.io";
-        NSString *encodedIP = [ip stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLPathAllowedCharacterSet]];
-        NSString *urlString = nil;
-
-        if ([provider isEqualToString:@"ip-api.com"]) {
-            urlString = [NSString stringWithFormat:@"https://ip-api.com/json/%@?fields=status,message,lat,lon,query,city,regionName,country,countryCode,isp,as", encodedIP];
-        } else if ([provider isEqualToString:@"ipinfo.io"]) {
-            NSString *token = [ConfigurationManager sharedManager].ipInfoAPIToken;
-            NSString *encodedToken = token.length > 0 ? [token stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]] : @"";
-            if (encodedToken.length > 0) {
-                urlString = [NSString stringWithFormat:@"https://ipinfo.io/%@/json?token=%@", encodedIP, encodedToken];
-            } else {
-                urlString = [NSString stringWithFormat:@"https://ipinfo.io/%@/json", encodedIP];
-            }
-        } else {
-            NSString *template = [[NSUserDefaults standardUserDefaults] stringForKey:SNBUserDefaultsKeyMapProviderURLTemplate];
-            if (template.length == 0) {
-                dispatch_semaphore_signal(self.geoLocationSemaphore);
-                completion(kCLLocationCoordinate2DInvalid, NO);
-                return;
-            }
-            urlString = [NSString stringWithFormat:template, encodedIP];
-        }
-
-        NSURL *url = [NSURL URLWithString:urlString];
-        if (!url) {
-            dispatch_semaphore_signal(self.geoLocationSemaphore);
-            completion(kCLLocationCoordinate2DInvalid, NO);
-            return;
-        }
-
-        SNBLogUIDebug(" lookup %s via %s", ip.UTF8String, urlString.UTF8String);
-
-        NSURLSessionDataTask *task = [self.session dataTaskWithURL:url completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-            // Release semaphore when request completes
-            dispatch_semaphore_signal(self.geoLocationSemaphore);
-        NSHTTPURLResponse *httpResponse = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
-        if (error || !data) {
-            SNBLogUIDebug(" lookup failed for %s: %s", ip.UTF8String, error.localizedDescription.UTF8String);
-            completion(kCLLocationCoordinate2DInvalid, NO);
-            return;
-        }
-        if (httpResponse) {
-            SNBLogUIDebug(" response %s status %ld", ip.UTF8String, (long)httpResponse.statusCode);
-        }
-        
-        if ([provider isEqualToString:@"ip-api.com"] && httpResponse.statusCode == 403) {
-            SNBLogUIDebug(" fallback to ipinfo.io for %s", ip.UTF8String);
-            dispatch_async(dispatch_get_main_queue(), ^{
-                NSString *savedProvider = self.providerName;
-                self.providerName = @"ipinfo.io";
-                [self fetchLocationForIP:ip completion:completion];
-                self.providerName = savedProvider;
-            });
-            return;
-        }
-        
-        NSError *jsonError;
-        id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:&jsonError];
-        if (jsonError || ![json isKindOfClass:[NSDictionary class]]) {
-            SNBLogUIDebug(" JSON error for %s: %s", ip.UTF8String, jsonError.localizedDescription.UTF8String);
-            completion(kCLLocationCoordinate2DInvalid, NO);
-            return;
-        }
-        
-        NSDictionary *dict = (NSDictionary *)json;
-        CLLocationDegrees lat = 0;
-        CLLocationDegrees lon = 0;
-        BOOL success = NO;
-        NSString *name = nil;
-        NSString *isp = nil;
-        NSString *country = nil;
-        NSString *asn = nil;
-        
-        if ([provider isEqualToString:@"ip-api.com"]) {
-            NSString *status = dict[@"status"];
-            if ([status isEqualToString:@"success"]) {
-                lat = [dict[@"lat"] doubleValue];
-                lon = [dict[@"lon"] doubleValue];
-                NSString *city = dict[@"city"];
-                NSString *region = dict[@"regionName"];
-                NSString *countryName = dict[@"country"];
-                NSString *countryCode = dict[@"countryCode"];
-                isp = dict[@"isp"];
-                asn = dict[@"as"];
-                NSMutableArray<NSString *> *parts = [NSMutableArray array];
-                if (city.length > 0) [parts addObject:city];
-                if (region.length > 0) [parts addObject:region];
-                if (countryName.length > 0) [parts addObject:countryName];
-                name = parts.count > 0 ? [parts componentsJoinedByString:@", "] : nil;
-                country = countryCode.length > 0 ? countryCode : countryName;
-                success = YES;
-            }
-        } else if ([provider isEqualToString:@"ipinfo.io"]) {
-            NSString *loc = dict[@"loc"];
-            NSArray<NSString *> *parts = [loc componentsSeparatedByString:@","];
-            if (parts.count == 2) {
-                lat = [parts[0] doubleValue];
-                lon = [parts[1] doubleValue];
-                NSString *city = dict[@"city"];
-                NSString *region = dict[@"region"];
-                country = dict[@"country"];
-                NSString *org = dict[@"org"];
-                NSString *company = dict[@"company"];
-                if (org.length > 0) {
-                    isp = org;
-                } else if (company.length > 0) {
-                    isp = company;
-                }
-                asn = org.length > 0 ? org : company;
-                NSMutableArray<NSString *> *nameParts = [NSMutableArray array];
-                if (city.length > 0) [nameParts addObject:city];
-                if (region.length > 0) [nameParts addObject:region];
-                if (country.length > 0) [nameParts addObject:country];
-                name = nameParts.count > 0 ? [nameParts componentsJoinedByString:@", "] : nil;
-                success = YES;
-            }
-        } else {
-            NSString *latKey = [[NSUserDefaults standardUserDefaults] stringForKey:SNBUserDefaultsKeyMapProviderLatKey] ?: @"lat";
-            NSString *lonKey = [[NSUserDefaults standardUserDefaults] stringForKey:SNBUserDefaultsKeyMapProviderLonKey] ?: @"lon";
-            id latValue = [dict valueForKeyPath:latKey];
-            id lonValue = [dict valueForKeyPath:lonKey];
-            if ([latValue respondsToSelector:@selector(doubleValue)] &&
-                [lonValue respondsToSelector:@selector(doubleValue)]) {
-                lat = [latValue doubleValue];
-                lon = [lonValue doubleValue];
-                success = YES;
-            }
-        }
-        
-        if (success) {
-            SNBLogUIDebug(" location %s => (%f, %f)", ip.UTF8String, lat, lon);
-            NSMutableDictionary *payload = [NSMutableDictionary dictionaryWithDictionary:@{@"lat": @(lat), @"lon": @(lon)}];
-            if (name.length > 0) {
-                payload[@"name"] = name;
-            }
-            if (isp.length > 0) {
-                payload[@"isp"] = isp;
-            }
-            if (country.length > 0) {
-                payload[@"country"] = country;
-            }
-            if (asn.length > 0) {
-                payload[@"asn"] = asn;
-            }
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self.locationCache setObject:payload forKey:ip];
-                [self.locationStore storeLocation:payload forIP:ip];
-                completion(CLLocationCoordinate2DMake(lat, lon), YES);
-            });
-        } else {
-            SNBLogUIDebug(" location missing for %s (%s)", ip.UTF8String, provider.UTF8String);
-            completion(kCLLocationCoordinate2DInvalid, NO);
-        }
-        }];
-        [task resume];
-    });
 }
 
 #pragma mark - WKNavigationDelegate

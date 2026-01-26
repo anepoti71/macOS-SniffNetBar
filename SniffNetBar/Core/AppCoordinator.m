@@ -30,6 +30,7 @@
 #import "PromotionAgent/SNBPromotionDecision.h"
 #import "PromotionAgent/SNBPromotionPolicy.h"
 #import "SNBPrivilegedHelperClient.h"
+#import "SNBStatusBarManager.h"
 #import <ServiceManagement/ServiceManagement.h>
 #import <AppKit/AppKit.h>
 
@@ -45,7 +46,7 @@
 @property (nonatomic, copy) SNBTimerID deviceRefreshTimerID;
 @property (nonatomic, copy) SNBTimerID anomalyRetrainTimerID;
 @property (nonatomic, assign) BOOL anomalyRetrainInProgress;
-@property (nonatomic, weak) NSStatusItem *statusItem;
+@property (nonatomic, strong) SNBStatusBarManager *statusBarManager;
 @property (nonatomic, weak) NSMenu *statusMenu;
 @property (nonatomic, assign) BOOL menuRefreshPending;
 @property (nonatomic, strong) SNBNetworkAssetMonitor *assetMonitor;
@@ -63,11 +64,11 @@
 
 @implementation AppCoordinator
 
-- (instancetype)initWithStatusItem:(NSStatusItem *)statusItem
-                         statusMenu:(NSMenu *)statusMenu {
+- (instancetype)initWithStatusBarManager:(SNBStatusBarManager *)statusBarManager
+                              statusMenu:(NSMenu *)statusMenu {
     self = [super init];
     if (self) {
-        _statusItem = statusItem;
+        _statusBarManager = statusBarManager;
         _statusMenu = statusMenu;
         _configuration = [ConfigurationManager sharedManager];
         [self registerDefaultPreferences];
@@ -78,7 +79,7 @@
         _deviceManager = [[DeviceManager alloc] initWithPacketManager:packetManager
                                                         configuration:_configuration];
         _menuBuilder = [[MenuBuilder alloc] initWithMenu:statusMenu
-                                              statusItem:statusItem
+                                      statusBarManager:statusBarManager
                                            configuration:_configuration];
         _menuBuilder.delegate = self;
         _threatIntelCoordinator = [[ThreatIntelCoordinator alloc] initWithConfiguration:_configuration];
@@ -321,9 +322,9 @@
     if (!started) {
         if (!self.deviceManager.selectedDevice ||
             [self.deviceManager.selectedDevice.name isEqualToString:@"(no device)"]) {
-            self.statusItem.button.title = @"❌ No Device";
+            [self.statusBarManager updateButtonTitle:@"❌ No Device"];
         } else {
-            self.statusItem.button.title = @"❌";
+            [self.statusBarManager updateButtonTitle:@"❌"];
         }
     }
 }
@@ -335,7 +336,7 @@
     if (changed) {
         [self.statistics reset];
         if (error) {
-            self.statusItem.button.title = @"❌";
+            [self.statusBarManager updateButtonTitle:@"❌"];
         }
     }
 }
