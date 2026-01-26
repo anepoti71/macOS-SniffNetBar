@@ -8,6 +8,7 @@
 #import "SNBAggregateEngine.h"
 #import "SNBModelingUtilities.h"
 #import "SNBScoringConfig.h"
+#import "SNBSystemProcessWhitelist.h"
 
 @interface SNBScoringEngine ()
 @property (nonatomic, strong) SNBScoringConfig *config;
@@ -31,28 +32,89 @@
     uint64_t seenCount = snapshot ? snapshot.seenCount : 0;
     SNBScoringConfig *config = self.config ?: [SNBScoringConfig defaultConfig];
 
+    // Track attribution bonuses to enforce cap
+    NSInteger totalAttributionBonus = 0;
+
+    // Check if process is whitelisted
+    BOOL isWhitelisted = NO;
+    double trustLevel = 0.0;
+    if (config.processWhitelist && event.processName.length > 0) {
+        isWhitelisted = [config.processWhitelist isProcessWhitelisted:event.processName];
+        if (isWhitelisted) {
+            trustLevel = [config.processWhitelist trustLevelForProcess:event.processName];
+        }
+    }
+
+    // Process attribution scoring
     BOOL hasProcess = event.processName.length > 0;
     if (hasProcess) {
-        score += config.attributionBonus;
+        NSInteger bonus = config.attributionBonus;
+        totalAttributionBonus += bonus;
+        score += bonus;
         [evidence addObject:@{@"type": @"attribution", @"detail": @"Process attribution available"}];
+
+        // Add bonus for whitelisted system processes
+        if (isWhitelisted) {
+            NSInteger whitelistBonus = config.whitelistedProcessBonus;
+            totalAttributionBonus += whitelistBonus;
+            score += whitelistBonus;
+            NSString *detail = [NSString stringWithFormat:@"Known system process (trust: %.0f%%)", trustLevel * 100];
+            [evidence addObject:@{@"type": @"attribution", @"detail": detail}];
+        }
     } else {
+        // Missing attribution penalty - check if we should reduce/skip for whitelisted processes
+        // Note: If process name is missing, we can't check whitelist, so full penalty applies
         score -= config.missingAttributionPenalty;
         [evidence addObject:@{@"type": @"attribution", @"detail": @"Missing process attribution"}];
     }
 
+    // Signing status
     if ([event.signingStatus isEqualToString:@"signed"]) {
-        score += config.attributionBonus;
+        NSInteger bonus = config.attributionBonus;
+        totalAttributionBonus += bonus;
+        score += bonus;
         [evidence addObject:@{@"type": @"attribution", @"detail": @"Signed binary"}];
     }
 
+    // Bundle ID
+    if (event.bundleID.length > 0) {
+        NSInteger bonus = config.bundleIDBonus;
+        totalAttributionBonus += bonus;
+        score += bonus;
+        [evidence addObject:@{@"type": @"attribution", @"detail": @"Bundle ID available"}];
+    }
+
+    // Parent process
+    if (event.parentProcess.length > 0) {
+        NSInteger bonus = config.parentProcessBonus;
+        totalAttributionBonus += bonus;
+        score += bonus;
+        [evidence addObject:@{@"type": @"attribution", @"detail": @"Parent process available"}];
+    }
+
+    // Enforce attribution bonus cap
+    if (totalAttributionBonus > config.maxAttributionBonus) {
+        NSInteger excess = totalAttributionBonus - config.maxAttributionBonus;
+        score -= excess;
+    }
+
+    // Repeat/history scoring
     if (seenCount > (uint64_t)config.repeatThresholdHigh) {
         score += config.repeatScoreBonus;
         [evidence addObject:@{@"type": @"behavior", @"detail": @"Repeated destination over time"}];
     } else if (seenCount <= (uint64_t)config.repeatThresholdLow) {
-        score -= config.repeatScorePenalty;
-        [evidence addObject:@{@"type": @"behavior", @"detail": @"New destination, limited history"}];
+        // Reduce penalty for whitelisted processes with some history
+        NSInteger penalty = config.repeatScorePenalty;
+        if (isWhitelisted && seenCount >= (uint64_t)config.whitelistMinSeenCount) {
+            penalty = (NSInteger)(penalty * config.whitelistedPenaltyMultiplier);
+            [evidence addObject:@{@"type": @"behavior", @"detail": @"New destination (reduced penalty for system process)"}];
+        } else {
+            [evidence addObject:@{@"type": @"behavior", @"detail": @"New destination, limited history"}];
+        }
+        score -= penalty;
     }
 
+    // Time-based novelty scoring
     if (snapshot) {
         NSString *hourKey = [NSString stringWithFormat:@"%ld",
                              (long)[[NSCalendar currentCalendar] component:NSCalendarUnitHour fromDate:event.end]];
@@ -60,32 +122,60 @@
                             (long)[[NSCalendar currentCalendar] component:NSCalendarUnitWeekday fromDate:event.end]];
         double hourCount = [snapshot.hourHistogram[hourKey] doubleValue];
         double dowCount = [snapshot.dowHistogram[dowKey] doubleValue];
+
         if (seenCount > 0 && (hourCount / (double)seenCount) < config.timeNoveltyThreshold) {
-            score -= config.timeNoveltyPenalty;
+            NSInteger penalty = config.timeNoveltyPenalty;
+            // Reduce penalty for whitelisted system processes
+            if (isWhitelisted && trustLevel >= config.highTrustThreshold) {
+                penalty = (NSInteger)(penalty * config.whitelistedPenaltyMultiplier);
+            }
+            score -= penalty;
             [evidence addObject:@{@"type": @"behavior", @"detail": @"Unusual time-of-day for this destination"}];
         }
+
         if (seenCount > 0 && (dowCount / (double)seenCount) < config.timeNoveltyThreshold) {
-            score -= (config.timeNoveltyPenalty - 2);
+            NSInteger penalty = config.timeNoveltyPenalty - 2;
+            if (isWhitelisted && trustLevel >= config.highTrustThreshold) {
+                penalty = (NSInteger)(penalty * config.whitelistedPenaltyMultiplier);
+            }
+            score -= penalty;
             [evidence addObject:@{@"type": @"behavior", @"detail": @"Unusual day-of-week for this destination"}];
         }
+
+        // Beacon detection - still apply to whitelisted processes but note in evidence
         if (snapshot.beaconScore > config.beaconThreshold) {
-            score -= config.beaconPenalty;
-            [evidence addObject:@{@"type": @"behavior", @"detail": @"Regular interval pattern (possible beaconing)"}];
+            NSInteger penalty = config.beaconPenalty;
+            // High-trust system processes may legitimately beacon (telemetry, updates, etc.)
+            if (isWhitelisted && trustLevel >= config.highTrustThreshold) {
+                penalty = (NSInteger)(penalty * config.whitelistedPenaltyMultiplier);
+                [evidence addObject:@{@"type": @"behavior", @"detail": @"Regular interval pattern (expected for system service)"}];
+            } else {
+                [evidence addObject:@{@"type": @"behavior", @"detail": @"Regular interval pattern (possible beaconing)"}];
+            }
+            score -= penalty;
         }
+
+        // Rolling window stability
         if (snapshot.seen1h > 10 || snapshot.seen24h > 50 || snapshot.seen7d > 200) {
             score += config.stableWindowBonus;
             [evidence addObject:@{@"type": @"behavior", @"detail": @"Stable activity across rolling windows"}];
         } else if (snapshot.seen1h <= 1 && snapshot.seen24h <= 3) {
-            score -= config.sparseWindowPenalty;
+            NSInteger penalty = config.sparseWindowPenalty;
+            if (isWhitelisted && seenCount >= (uint64_t)config.whitelistMinSeenCount) {
+                penalty = (NSInteger)(penalty * config.whitelistedPenaltyMultiplier);
+            }
+            score -= penalty;
             [evidence addObject:@{@"type": @"behavior", @"detail": @"Sparse history in rolling windows"}];
         }
     }
 
+    // Direction penalty
     if ([event.direction isEqualToString:@"in"]) {
         score -= config.inboundPenalty;
         [evidence addObject:@{@"type": @"network", @"detail": @"Inbound connection"}];
     }
 
+    // Volume anomaly
     if (snapshot && snapshot.bytesEwma > 0.0) {
         double currentBytes = (double)(event.bytesIn + event.bytesOut);
         double ratio = currentBytes / snapshot.bytesEwma;
@@ -95,48 +185,51 @@
         }
     }
 
+    // VPN/relay/hosting penalty
     if (event.vpn || event.relay || event.hosting) {
         score -= config.vpnRelayPenalty;
         [evidence addObject:@{@"type": @"network", @"detail": @"Connection via VPN/relay/hosting"}];
     }
 
+    // Threat intel
     double intelScore = MAX(event.vtScore.doubleValue, event.abuseScore.doubleValue);
     if (intelScore >= config.threatScoreThreshold ||
         [event.greyNoiseClass isEqualToString:@"malicious"]) {
+        // Always apply full threat penalty regardless of whitelist
         score -= config.threatPenalty;
         [evidence addObject:@{@"type": @"threat", @"detail": @"High-confidence threat intel signal"}];
     }
 
-    if (event.bundleID.length > 0) {
-        score += config.bundleIDBonus;
-        [evidence addObject:@{@"type": @"attribution", @"detail": @"Bundle ID available"}];
-    }
-
-    if (event.parentProcess.length > 0) {
-        score += config.parentProcessBonus;
-        [evidence addObject:@{@"type": @"attribution", @"detail": @"Parent process available"}];
-    }
-
+    // TLS fingerprint
     if (event.ja3.length > 0 || event.ja4.length > 0) {
         score += config.tlsFingerprintBonus;
         [evidence addObject:@{@"type": @"network", @"detail": @"TLS fingerprint observed"}];
     }
 
+    // Long duration penalty
     if (event.duration >= config.longDurationThreshold) {
-        score -= config.longDurationPenalty;
+        NSInteger penalty = config.longDurationPenalty;
+        // Long-lived connections are common for system services
+        if (isWhitelisted && trustLevel >= 0.8) {
+            penalty = (NSInteger)(penalty * config.whitelistedPenaltyMultiplier);
+        }
+        score -= penalty;
         [evidence addObject:@{@"type": @"network", @"detail": @"Long-lived connection"}];
     }
 
+    // Connection failure penalty
     if ([event.outcome isEqualToString:@"fail"] || [event.outcome isEqualToString:@"reset"]) {
         score -= config.failurePenalty;
         [evidence addObject:@{@"type": @"network", @"detail": @"Failed connection attempts"}];
     }
 
+    // Common ports bonus
     if (event.dstPort == 80 || event.dstPort == 443) {
         score += config.commonPortBonus;
         [evidence addObject:@{@"type": @"network", @"detail": @"Common web port"}];
     }
 
+    // ASN/Org/Geo anomaly detection
     BOOL asnAnomaly = NO;
     if (snapshot) {
         if (snapshot.baselineASN.length > 0 && event.asn.length > 0 &&
@@ -156,13 +249,20 @@
             asnAnomaly = YES;
         }
         if (asnAnomaly) {
-            score -= config.asnAnomalyPenalty;
+            NSInteger penalty = config.asnAnomalyPenalty;
+            // CDN-based services (like Apple) may have legitimate ASN variance
+            if (isWhitelisted && trustLevel >= config.highTrustThreshold) {
+                penalty = (NSInteger)(penalty * config.whitelistedPenaltyMultiplier);
+            }
+            score -= penalty;
             [evidence addObject:@{@"type": @"network", @"detail": @"ASN/org/geo deviates from baseline"}];
         }
     }
 
+    // Clamp score to valid range
     score = MAX(0, MIN(100, score));
 
+    // Determine label based on score
     NSString *label = @"Unclear";
     if (score >= 70) {
         label = @"Likely Legitimate";
@@ -174,9 +274,13 @@
         [actions addObject:@"Recommend: Observe longer"];
     }
 
+    // Calculate confidence based on available data points
     NSInteger dataPoints = 0;
     if (hasProcess) {
         dataPoints += 1;
+    }
+    if (isWhitelisted) {
+        dataPoints += 1; // Extra confidence for known processes
     }
     if (snapshot && snapshot.seenCount > 5) {
         dataPoints += 1;
@@ -198,6 +302,7 @@
     NSString *summary = [NSString stringWithFormat:@"Score %ld with %llu sightings",
                          (long)score, (unsigned long long)seenCount];
 
+    // Build recommendation
     SNBRecommendation *recommendation = [[SNBRecommendation alloc] init];
     recommendation.clusterID = SNBClusterIDForEvent(event);
     recommendation.extendedContext = SNBExtendedContextJSONForEvent(event);
@@ -211,6 +316,7 @@
     recommendation.actions = actions;
     recommendation.generatedAt = [NSDate date];
 
+    // Handle IP-only connections (no domain info)
     if (SNBEventIsIPOnly(event)) {
         recommendation.ipOnly = YES;
         recommendation.confidence = MIN(30, recommendation.baseConfidence);
@@ -220,6 +326,7 @@
         }
         [evidence addObject:@{@"type": @"network", @"detail": @"No domain info (IP-only)"}];
     }
+
     return recommendation;
 }
 

@@ -4,15 +4,20 @@
 //
 
 #import "SNBScoringConfig.h"
+#import "SNBSystemProcessWhitelist.h"
 
 @implementation SNBScoringConfig
 
 + (instancetype)defaultConfig {
     SNBScoringConfig *config = [[SNBScoringConfig alloc] init];
+
+    // Repeat/history thresholds
     config.repeatThresholdHigh = 20;
     config.repeatThresholdLow = 2;
     config.beaconThreshold = 0.7;
     config.timeNoveltyThreshold = 0.05;
+
+    // Score adjustments
     config.repeatScoreBonus = 15;
     config.repeatScorePenalty = 10;
     config.timeNoveltyPenalty = 8;
@@ -35,6 +40,18 @@
     config.longDurationThreshold = 300.0;
     config.longDurationPenalty = 4;
     config.failurePenalty = 4;
+
+    // Attribution bonus cap
+    config.maxAttributionBonus = 20;
+
+    // System process whitelist configuration
+    config.processWhitelist = [SNBSystemProcessWhitelist sharedWhitelist];
+    config.whitelistedProcessBonus = 8;
+    config.whitelistedPenaltyMultiplier = 0.3;  // 30% of normal penalty
+    config.whitelistMinSeenCount = 5;
+    config.skipAttributionPenaltyForHighTrust = YES;
+    config.highTrustThreshold = 0.9;
+
     return config;
 }
 

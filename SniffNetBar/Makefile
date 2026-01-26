@@ -54,7 +54,8 @@ MODELING_SOURCES = BehaviorModel/SNBEventSchema.m BehaviorModel/SNBEventPublishe
                    BehaviorModel/SNBModelingXPCService.m BehaviorModel/SNBEventStore.m \
                    BehaviorModel/SNBAggregateEngine.m BehaviorModel/SNBRecommendationStore.m \
                    BehaviorModel/SNBScoringEngine.m BehaviorModel/SNBModelingUtilities.m \
-                   BehaviorModel/SNBBehaviorDatabase.m BehaviorModel/SNBScoringConfig.m
+                   BehaviorModel/SNBBehaviorDatabase.m BehaviorModel/SNBScoringConfig.m \
+                   BehaviorModel/SNBSystemProcessWhitelist.m
 NETWORK_SOURCES = Network/PacketCaptureManager.m Network/NetworkDevice.m \
                   Network/DeviceManager.m Network/NetworkAssetMonitor.m
 THREATINTEL_SOURCES = ThreatIntel/ThreatIntelModels.m \
