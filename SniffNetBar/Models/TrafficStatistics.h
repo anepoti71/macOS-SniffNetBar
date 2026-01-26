@@ -24,6 +24,7 @@
 
 @interface TrafficStats : NSObject
 
+@property (nonatomic, assign) CFAbsoluteTime timestamp;
 @property (nonatomic, assign) uint64_t totalBytes;
 @property (nonatomic, assign) uint64_t incomingBytes;
 @property (nonatomic, assign) uint64_t outgoingBytes;

@@ -26,6 +26,7 @@ static const NSTimeInterval kDefaultEvaluationInterval = 900.0;  // 15 minutes
 @property (nonatomic, strong) SNBPromotionEvaluator *evaluator;
 @property (nonatomic, strong) SNBPromotionLog *promotionLog;
 @property (nonatomic, copy, nullable) SNBTimerID evaluationTimerID;
+@property (nonatomic, copy, nullable) SNBTimerID idleTimerID;
 @property (nonatomic, strong) NSMutableArray<SNBPromotionDecision *> *pendingSuggestionsArray;
 @property (nonatomic, strong) dispatch_queue_t evaluationQueue;
 @property (nonatomic, assign) BOOL evaluationInProgress;
@@ -64,8 +65,7 @@ static const NSTimeInterval kDefaultEvaluationInterval = 900.0;  // 15 minutes
         NSString *logPath = [[self applicationSupportDirectory] stringByAppendingPathComponent:@"promotion_log.sqlite"];
         _promotionLog = [[SNBPromotionLog alloc] initWithDatabasePath:logPath];
 
-        // Initialize evaluator (without AI initially, will be enabled after ping)
-        _evaluator = [[SNBPromotionEvaluator alloc] initWithPolicy:policy ollamaClient:nil];
+        _evaluator = nil;
     }
     return self;
 }
@@ -86,6 +86,14 @@ static const NSTimeInterval kDefaultEvaluationInterval = 900.0;  // 15 minutes
                    (unsigned long long)self.policy.minSeenCount);
     self.isRunning = YES;
 
+    if (!self.evaluator) {
+        self.evaluator = [[SNBPromotionEvaluator alloc] initWithPolicy:self.policy ollamaClient:nil];
+    }
+    if (self.idleTimerID) {
+        [[SNBTimerCoordinator sharedCoordinator] cancelTimer:self.idleTimerID];
+        self.idleTimerID = nil;
+    }
+
     // Check AI availability
     [self checkAIAvailability:^(BOOL available) {
         if (available) {
@@ -102,15 +110,10 @@ static const NSTimeInterval kDefaultEvaluationInterval = 900.0;  // 15 minutes
     }];
 
     // Schedule periodic evaluation
-    __weak typeof(self) weakSelf = self;
-    SNBTimerCoordinator *coordinator = [SNBTimerCoordinator sharedCoordinator];
-    self.evaluationTimerID = [coordinator scheduleRepeatingTimerWithInterval:self.evaluationInterval
-                                                                       queue:dispatch_get_main_queue()
-                                                                     handler:^{
-        [weakSelf evaluateNow];
-    }];
+    [self scheduleEvaluationTimerIfNeeded];
 
     // Run initial evaluation after a short delay
+    __weak typeof(self) weakSelf = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         [weakSelf evaluateNow];
@@ -130,6 +133,11 @@ static const NSTimeInterval kDefaultEvaluationInterval = 900.0;  // 15 minutes
         [coordinator cancelTimer:self.evaluationTimerID];
         self.evaluationTimerID = nil;
     }
+    if (self.idleTimerID) {
+        SNBTimerCoordinator *coordinator = [SNBTimerCoordinator sharedCoordinator];
+        [coordinator cancelTimer:self.idleTimerID];
+        self.idleTimerID = nil;
+    }
 }
 
 - (void)evaluateNow {
@@ -148,6 +156,12 @@ static const NSTimeInterval kDefaultEvaluationInterval = 900.0;  // 15 minutes
         if (candidates.count == 0) {
             SNBLogAgentInfo("No promotion candidates found");
             self.evaluationInProgress = NO;
+            if (self.evaluationTimerID) {
+                SNBTimerCoordinator *coordinator = [SNBTimerCoordinator sharedCoordinator];
+                [coordinator cancelTimer:self.evaluationTimerID];
+                self.evaluationTimerID = nil;
+                [self scheduleIdleCheck];
+            }
             dispatch_async(dispatch_get_main_queue(), ^{
                 if ([self.delegate respondsToSelector:@selector(promotionAgentDidCompleteEvaluation:)]) {
                     [self.delegate promotionAgentDidCompleteEvaluation:self];
@@ -163,7 +177,43 @@ static const NSTimeInterval kDefaultEvaluationInterval = 900.0;  // 15 minutes
                             c.clusterID, (long)c.score, (long)c.confidence,
                             (unsigned long long)c.seenCount, c.userLabel ?: @"(none)", c.label ?: @"(none)");
         }
+        [self scheduleEvaluationTimerIfNeeded];
         [self evaluateCandidates:candidates];
+    }];
+}
+
+- (void)scheduleEvaluationTimerIfNeeded {
+    if (self.evaluationTimerID) {
+        return;
+    }
+    __weak typeof(self) weakSelf = self;
+    SNBTimerCoordinator *coordinator = [SNBTimerCoordinator sharedCoordinator];
+    self.evaluationTimerID = [coordinator scheduleRepeatingTimerWithInterval:self.evaluationInterval
+                                                                       queue:dispatch_get_main_queue()
+                                                                     handler:^{
+        [weakSelf evaluateNow];
+    }];
+}
+
+- (void)scheduleIdleCheck {
+    if (self.idleTimerID) {
+        return;
+    }
+    NSTimeInterval delay = MAX(self.evaluationInterval * 2.0, 60.0);
+    __weak typeof(self) weakSelf = self;
+    SNBTimerCoordinator *coordinator = [SNBTimerCoordinator sharedCoordinator];
+    self.idleTimerID = [coordinator scheduleOneShotTimerWithDelay:delay
+                                                           queue:dispatch_get_main_queue()
+                                                         handler:^{
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) {
+            return;
+        }
+        strongSelf.idleTimerID = nil;
+        if (strongSelf.isRunning) {
+            [strongSelf scheduleEvaluationTimerIfNeeded];
+            [strongSelf evaluateNow];
+        }
     }];
 }
 

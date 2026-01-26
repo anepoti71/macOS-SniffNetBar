@@ -130,6 +130,9 @@ static NSString *SNBStoredDeviceName(void) {
 // Last stats for highlighting updates
 @property (nonatomic, strong) TrafficStats *lastTrafficStats;
 @property (nonatomic, copy) NSDictionary<NSString *, TIEnrichmentResponse *> *lastThreatIntelResults;
+@property (nonatomic, assign) CFAbsoluteTime lastStatsTimestampForMapConnections;
+@property (nonatomic, assign) CFAbsoluteTime lastStatsTimestampForHighlights;
+@property (nonatomic, copy) NSArray<ConnectionTraffic *> *cachedMapConnections;
 
 // Fix 3: Track when selection-triggered refresh occurred to avoid redundant refreshes
 @property (nonatomic, assign) NSTimeInterval lastSelectionRefreshTime;
@@ -529,6 +532,36 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
     self.lastRateSampleTime = now;
     self.lastIncomingBytesSample = incoming;
     self.lastOutgoingBytesSample = outgoing;
+}
+
+- (void)updateModelCachesWithStats:(TrafficStats *)stats
+                threatIntelResults:(NSDictionary<NSString *, TIEnrichmentResponse *> *)threatIntelResults {
+    if (!stats) {
+        return;
+    }
+    self.lastTrafficStats = stats;
+    self.lastThreatIntelResults = threatIntelResults ?: @{};
+    [self updateNetworkActivityRateHistoryWithStats:stats];
+
+    if (stats.timestamp != self.lastStatsTimestampForHighlights) {
+        [self updateProcessHighlightColorsWithSummaries:stats.processSummaries ?: @[]];
+        self.lastStatsTimestampForHighlights = stats.timestamp;
+    }
+    if (stats.timestamp != self.lastStatsTimestampForMapConnections || !self.cachedMapConnections) {
+        self.cachedMapConnections = [self connectionsForMapFromStats:stats];
+        self.lastStatsTimestampForMapConnections = stats.timestamp;
+    }
+}
+
+- (NSArray<ConnectionTraffic *> *)cachedMapConnectionsForStats:(TrafficStats *)stats {
+    if (!stats) {
+        return @[];
+    }
+    if (stats.timestamp != self.lastStatsTimestampForMapConnections || !self.cachedMapConnections) {
+        self.cachedMapConnections = [self connectionsForMapFromStats:stats];
+        self.lastStatsTimestampForMapConnections = stats.timestamp;
+    }
+    return self.cachedMapConnections ?: @[];
 }
 
 - (NSMenuItem *)networkActivityGraphMenuItemWithWidth:(CGFloat)width {
@@ -1602,7 +1635,8 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
     self.menuIsOpen = YES;
     SNBLogUIDebug("Status menu opened");
     if (self.showMap && self.mapMenuView) {
-        [self.mapMenuView updateWithConnections:[self connectionsForMapFromStats:stats]
+        NSArray<ConnectionTraffic *> *mapConnections = [self cachedMapConnectionsForStats:stats];
+        [self.mapMenuView updateWithConnections:mapConnections
                              threatIntelResults:self.lastThreatIntelResults ?: @{}
                                       blockedIPs:self.blockedIPs];
     }
@@ -1616,17 +1650,13 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
                 assetMonitorEnabled:(BOOL)assetMonitorEnabled
                      networkAssets:(NSArray<SNBNetworkAsset *> *)networkAssets
                    recentNewAssets:(NSArray<SNBNetworkAsset *> *)recentNewAssets {
-    // Save stats for highlighting updates when selection changes
-    self.lastTrafficStats = stats;
-    self.lastThreatIntelResults = threatIntelResults ?: @{};
-    [self updateNetworkActivityRateHistoryWithStats:stats];
-
-    [self updateProcessHighlightColorsWithSummaries:stats.processSummaries ?: @[]];
+    // Model update phase (cache heavy computations)
+    [self updateModelCachesWithStats:stats threatIntelResults:threatIntelResults];
     if (!self.menuIsOpen || !self.visualizationSubmenu) {
         return;
     }
 
-    NSArray<ConnectionTraffic *> *mapConnections = [self connectionsForMapFromStats:stats];
+    NSArray<ConnectionTraffic *> *mapConnections = [self cachedMapConnectionsForStats:stats];
     if (self.showMap && self.mapMenuView) {
         [self.mapMenuView updateWithConnections:mapConnections
                              threatIntelResults:threatIntelResults
@@ -2357,7 +2387,8 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
     if (self.mapMenuView) {
         self.mapMenuView.providerName = self.mapProviderName;
         if (self.showMap && stats) {
-            [self.mapMenuView updateWithConnections:[self connectionsForMapFromStats:stats]
+            NSArray<ConnectionTraffic *> *mapConnections = [self cachedMapConnectionsForStats:stats];
+            [self.mapMenuView updateWithConnections:mapConnections
                                  threatIntelResults:self.lastThreatIntelResults ?: @{}
                                           blockedIPs:self.blockedIPs];
         }
@@ -2373,6 +2404,7 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
                     assetMonitorEnabled:(BOOL)assetMonitorEnabled
                          networkAssets:(NSArray<SNBNetworkAsset *> *)networkAssets
                        recentNewAssets:(NSArray<SNBNetworkAsset *> *)recentNewAssets {
+    [self updateModelCachesWithStats:stats threatIntelResults:threatIntelResults];
     // Performance: Just call rebuild with reduced frequency (10s instead of 5s)
     // The real optimization is in refreshVisualizationWithStats throttling
     [self rebuildVisualizationMenuWithStats:stats
@@ -2398,11 +2430,10 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
     if (!visualizationSubmenu) {
         return;
     }
+    [self updateModelCachesWithStats:stats threatIntelResults:threatIntelResults];
     self.networkActivityGraphItem.view = nil;
     self.networkActivityGraphItem = nil;
     self.networkActivityGraphView = nil;
-
-    [self updateProcessHighlightColorsWithSummaries:stats.processSummaries ?: @[]];
 
     [self.dynamicStatItemInfo removeAllObjects];
     [self.detailStatItemInfo removeAllObjects];

@@ -1279,6 +1279,7 @@ static NSString *SNBResolveHostname(NSString *address,
 
 - (TrafficStats *)currentStatsLocked {
     TrafficStats *stats = [[TrafficStats alloc] init];
+    stats.timestamp = CFAbsoluteTimeGetCurrent();
     stats.totalBytes = self.totalBytes;
     stats.incomingBytes = self.incomingBytes;
     stats.outgoingBytes = self.outgoingBytes;

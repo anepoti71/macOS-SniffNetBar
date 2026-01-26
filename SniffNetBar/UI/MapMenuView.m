@@ -52,6 +52,16 @@ static const NSTimeInterval kRenderDebounceInterval = 0.25;
 @property (nonatomic, assign) BOOL publicIPLookupInFlight;
 @property (nonatomic, assign) BOOL mapReady;
 @property (nonatomic, copy) NSArray<NSString *> *lastTargetIPs;
+@property (nonatomic, copy) NSSet<NSString *> *lastTargetIPSet;
+@property (nonatomic, assign) uint64_t lastConnectionsHash;
+@property (nonatomic, assign) NSUInteger locationVersion;
+@property (nonatomic, assign) NSUInteger riskVersion;
+@property (nonatomic, assign) uint64_t cachedConnectionsHash;
+@property (nonatomic, assign) NSUInteger cachedLocationVersion;
+@property (nonatomic, assign) NSUInteger cachedRiskVersion;
+@property (nonatomic, assign) NSInteger cachedMaxLines;
+@property (nonatomic, copy) NSString *cachedPointsJSON;
+@property (nonatomic, copy) NSString *cachedLinesJSON;
 @property (nonatomic, strong) dispatch_queue_t renderQueue;
 @property (nonatomic, assign) NSUInteger renderGeneration;
 @property (nonatomic, copy) SNBTimerID renderDebounceTimerID;
@@ -60,6 +70,8 @@ static const NSTimeInterval kRenderDebounceInterval = 0.25;
 @property (nonatomic, assign) NSUInteger lastRenderedGeneration;
 @property (nonatomic, assign) NSUInteger scheduledRenderGeneration;
 @property (nonatomic, assign) NSUInteger lastRenderSignature;
+@property (nonatomic, assign) NSUInteger failedLookupResetVersion;
+@property (nonatomic, assign) NSUInteger lastLookupAttemptVersion;
 @property (nonatomic, strong) NSDate *lastCacheCleanupTime;
 @property (nonatomic, strong) dispatch_semaphore_t geoLocationSemaphore;
 @property (nonatomic, strong) NSWindow *detachedWindow;
@@ -90,6 +102,27 @@ static NSString *SNBLocationStoreDirectory(void) {
         return NSTemporaryDirectory();
     }
     return dir;
+}
+
+static inline uint64_t SNBHashCombine(uint64_t hash, uint64_t value) {
+    hash ^= value;
+    return hash * 1099511628211ULL;
+}
+
+static uint64_t SNBHashConnectionTuple(ConnectionTraffic *connection) {
+    uint64_t hash = 1469598103934665603ULL;
+    hash = SNBHashCombine(hash, connection.sourceAddress.hash);
+    hash = SNBHashCombine(hash, connection.destinationAddress.hash);
+    hash = SNBHashCombine(hash, (uint64_t)connection.sourcePort);
+    hash = SNBHashCombine(hash, (uint64_t)connection.destinationPort);
+    hash = SNBHashCombine(hash, connection.bytes);
+    hash = SNBHashCombine(hash, connection.incomingBytes);
+    hash = SNBHashCombine(hash, connection.outgoingBytes);
+    hash = SNBHashCombine(hash, (uint64_t)connection.packetCount);
+    hash = SNBHashCombine(hash, (uint64_t)connection.processPID);
+    hash = SNBHashCombine(hash, connection.processName.hash);
+    hash = SNBHashCombine(hash, (uint64_t)connection.lastActivity);
+    return hash;
 }
 
 - (instancetype)initWithFrame:(NSRect)frame {
@@ -392,6 +425,7 @@ static NSString *SNBLocationStoreDirectory(void) {
         if (failedCount > 0) {
             [self.failedLookups removeAllObjects];
             self.lastFailedLookupsReset = [NSDate date];
+            self.failedLookupResetVersion += 1;
             SNBLogUIDebug("MapMenuView: Reset %lu failed lookups (retry after %.0f minutes)",
                          (unsigned long)failedCount, kFailedLookupRetryInterval / 60.0);
         }
@@ -535,6 +569,13 @@ static NSString *SNBLocationStoreDirectory(void) {
     }
 
     self.lastConnections = connections;
+    uint64_t connectionsHash = 1469598103934665603ULL;
+    for (ConnectionTraffic *connection in connections) {
+        connectionsHash = SNBHashCombine(connectionsHash, SNBHashConnectionTuple(connection));
+    }
+    BOOL connectionsChanged = (connectionsHash != self.lastConnectionsHash);
+    self.lastConnectionsHash = connectionsHash;
+
     BOOL riskStateChanged = (self.threatIntelResults != threatIntelResults);
     NSSet<NSString *> *safeBlocked = blockedIPs ?: [NSSet set];
     if (!riskStateChanged && ![self.blockedIPs isEqualToSet:safeBlocked]) {
@@ -542,6 +583,9 @@ static NSString *SNBLocationStoreDirectory(void) {
     }
     self.threatIntelResults = threatIntelResults ?: @{};
     self.blockedIPs = safeBlocked;
+    if (riskStateChanged) {
+        self.riskVersion += 1;
+    }
 
     if (!self.isDetachedInstance && self.detachedMapView) {
         [self.detachedMapView updateWithConnections:connections
@@ -552,7 +596,9 @@ static NSString *SNBLocationStoreDirectory(void) {
         return;
     }
 
-    [self updateSeenForConnections:connections];
+    if (connectionsChanged) {
+        [self updateSeenForConnections:connections];
+    }
     if (riskStateChanged) {
         [self markRenderDataDirty];
     }
@@ -569,6 +615,9 @@ static NSString *SNBLocationStoreDirectory(void) {
     }
     SNBLogUIDebug(" update: %lu connections", (unsigned long)connections.count);
     [self updatePublicIPLocationIfNeeded];
+    if (!connectionsChanged && !riskStateChanged && self.lastTargetIPSet) {
+        return;
+    }
     if (connections.count == 0) {
         self.lastTargetIPs = @[];
         if ([self updateRenderSignatureWithConnections:connections targetIPs:self.lastTargetIPs]) {
@@ -599,6 +648,10 @@ static NSString *SNBLocationStoreDirectory(void) {
             SNBLogUIDebug(" skip local IP: %s", ip.UTF8String);
         }
     }
+    NSSet<NSString *> *previousTargetSet = self.lastTargetIPSet ?: [NSSet set];
+    NSSet<NSString *> *newTargetSet = [targetIps copy];
+    BOOL targetIpsChanged = ![newTargetSet isEqualToSet:previousTargetSet];
+    self.lastTargetIPSet = newTargetSet;
     self.lastTargetIPs = [targetIps.allObjects sortedArrayUsingSelector:@selector(compare:)];
     
     SNBLogUIDebug(" target IPs: %s", targetIps.description.UTF8String);
@@ -613,7 +666,13 @@ static NSString *SNBLocationStoreDirectory(void) {
         }
     }
     
-    for (NSString *ip in targetIps) {
+    NSMutableSet<NSString *> *lookupTargets = [NSMutableSet setWithSet:newTargetSet];
+    [lookupTargets minusSet:previousTargetSet];
+    if (self.lastLookupAttemptVersion != self.failedLookupResetVersion) {
+        [lookupTargets unionSet:newTargetSet];
+        self.lastLookupAttemptVersion = self.failedLookupResetVersion;
+    }
+    for (NSString *ip in lookupTargets) {
         NSDictionary *cached = [self.locationCache objectForKey:ip];
         if (!cached) {
             cached = [self.locationStore locationForIP:ip];
@@ -637,6 +696,7 @@ static NSString *SNBLocationStoreDirectory(void) {
                     return;
                 }
                 SNBLogUIDebug(" pin ready for %s (%f, %f)", ip.UTF8String, coord.latitude, coord.longitude);
+                self.locationVersion += 1;
                 [self markRenderDataDirty];
                 [self refreshMarkers];
             });
@@ -695,6 +755,7 @@ static NSString *SNBLocationStoreDirectory(void) {
                 }
                 self.publicIPCoordinate = [NSValue valueWithBytes:&coord objCType:@encode(CLLocationCoordinate2D)];
                 SNBLogUIDebug(" public IP located: %s => (%f, %f)", ip.UTF8String, coord.latitude, coord.longitude);
+                self.locationVersion += 1;
                 [self markRenderDataDirty];
                 [self refreshMarkers];
             });
@@ -809,6 +870,30 @@ static NSString *SNBLocationStoreDirectory(void) {
     NSString *publicIP = [self.publicIPAddress copy];
     NSValue *publicCoordValue = self.publicIPCoordinate;
     ConfigurationManager *config = [ConfigurationManager sharedManager];
+    NSInteger maxLines = MIN(config.maxConnectionLinesToShow, connections.count);
+
+    BOOL canReuseJSON = (self.cachedPointsJSON.length > 0 &&
+                         self.cachedLinesJSON.length > 0 &&
+                         self.cachedConnectionsHash == self.lastConnectionsHash &&
+                         self.cachedLocationVersion == self.locationVersion &&
+                         self.cachedRiskVersion == self.riskVersion &&
+                         self.cachedMaxLines == maxLines);
+    if (canReuseJSON) {
+        NSString *pointsJSON = [self.cachedPointsJSON copy];
+        NSString *linesJSON = [self.cachedLinesJSON copy];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (generation != self.renderGeneration || !self.mapReady) {
+                return;
+            }
+            NSString *script = [NSString stringWithFormat:@"window.SniffNetBar && window.SniffNetBar.setMarkers(%@, %@);", pointsJSON, linesJSON];
+            [self.webView evaluateJavaScript:script completionHandler:^(id result, NSError *error) {
+                if (error) {
+                    SNBLogUIDebug(" JS error: %s", error.localizedDescription.UTF8String);
+                }
+            }];
+        });
+        return;
+    }
 
     NSMutableDictionary<NSString *, NSDictionary *> *locationByIP = [NSMutableDictionary dictionary];
     for (NSString *ip in targetIPs) {
@@ -853,7 +938,6 @@ static NSString *SNBLocationStoreDirectory(void) {
         }
     }
 
-    NSInteger maxLines = MIN(config.maxConnectionLinesToShow, connections.count);
     for (NSInteger i = 0; i < maxLines; i++) {
         ConnectionTraffic *connection = connections[i];
         if (connection.sourceAddress.length > 0 && !locationByIP[connection.sourceAddress]) {
@@ -1069,6 +1153,12 @@ static NSString *SNBLocationStoreDirectory(void) {
             return;
         }
         NSString *lineJson = [[NSString alloc] initWithData:lineData encoding:NSUTF8StringEncoding];
+        strongSelf.cachedConnectionsHash = strongSelf.lastConnectionsHash;
+        strongSelf.cachedLocationVersion = strongSelf.locationVersion;
+        strongSelf.cachedRiskVersion = strongSelf.riskVersion;
+        strongSelf.cachedMaxLines = maxLines;
+        strongSelf.cachedPointsJSON = json;
+        strongSelf.cachedLinesJSON = lineJson;
         NSString *script = [NSString stringWithFormat:@"window.SniffNetBar && window.SniffNetBar.setMarkers(%@, %@);", json, lineJson];
 
         dispatch_async(dispatch_get_main_queue(), ^{
