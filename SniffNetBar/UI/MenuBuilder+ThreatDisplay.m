@@ -25,7 +25,12 @@
                                           connection:(ConnectionTraffic *)connection;
 @end
 
+#import <objc/runtime.h>
+
 @implementation MenuBuilder (ThreatDisplay)
+
+static const NSInteger kTrustedDetailsPlaceholderTag = 9201;
+static void *kTrustedDetailsMenuInfoKey = &kTrustedDetailsMenuInfoKey;
 
 // Helper to get shared trusted store instance
 - (SNBTrustedIPStore *)_trustedStore {
@@ -1118,6 +1123,196 @@
     }
 
     return items;
+}
+
+- (NSMenu *)trustedIPDetailsSubmenuForContext:(SNBTrustContext *)context
+                                        stats:(nullable TrafficStats *)stats {
+    NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Legitimate Connection Details"];
+    menu.autoenablesItems = NO;
+    menu.delegate = self;
+    objc_setAssociatedObject(menu, kTrustedDetailsMenuInfoKey, @{
+        @"context": context ?: [NSNull null],
+        @"stats": stats ?: [NSNull null]
+    }, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    NSMenuItem *loadingItem = [[NSMenuItem alloc] initWithTitle:@"Loading details..." action:nil keyEquivalent:@""];
+    loadingItem.tag = kTrustedDetailsPlaceholderTag;
+    [menu addItem:loadingItem];
+
+    return menu;
+}
+
+- (void)menuNeedsUpdate:(NSMenu *)menu {
+    NSDictionary *info = objc_getAssociatedObject(menu, kTrustedDetailsMenuInfoKey);
+    if (![info isKindOfClass:[NSDictionary class]]) {
+        return;
+    }
+    if (!info[@"context"]) {
+        return;
+    }
+
+    NSArray<NSMenuItem *> *items = menu.itemArray;
+    if (items.count > 0 && items.firstObject.tag != kTrustedDetailsPlaceholderTag) {
+        return;
+    }
+
+    [menu removeAllItems];
+
+    SNBTrustContext *context = info[@"context"];
+    if ((id)context == [NSNull null]) {
+        context = nil;
+    }
+    TrafficStats *stats = info[@"stats"];
+    if ((id)stats == [NSNull null]) {
+        stats = nil;
+    }
+
+    [self populateTrustedIPDetailsMenu:menu context:context stats:stats];
+}
+
+- (void)populateTrustedIPDetailsMenu:(NSMenu *)menu
+                             context:(SNBTrustContext *)context
+                               stats:(nullable TrafficStats *)stats {
+    [menu addItem:[self detailHeaderMenuItemWithTitle:@"Legitimate Connection Details"]];
+
+    NSString *ipAddress = context.ipAddress ?: @"";
+    if (ipAddress.length > 0) {
+        [menu addItem:[self detailMenuItemWithTitle:[NSString stringWithFormat:@"IP: %@", ipAddress]]];
+    }
+
+    if (context.reason != SNBTrustReasonUnspecified) {
+        NSString *reason = [SNBTrustContext displayStringForReason:context.reason];
+        [menu addItem:[self detailMenuItemWithTitle:[NSString stringWithFormat:@"Reason: %@", reason]]];
+    }
+
+    if (context.customReasonNote.length > 0) {
+        [menu addItem:[self detailMenuItemWithTitle:[NSString stringWithFormat:@"Note: %@", context.customReasonNote]]];
+    }
+
+    if (context.hostname.length > 0) {
+        [menu addItem:[self detailMenuItemWithTitle:[NSString stringWithFormat:@"Hostname: %@", context.hostname]]];
+    }
+
+    if (context.processName.length > 0 && context.processPID > 0) {
+        [menu addItem:[self detailMenuItemWithTitle:[NSString stringWithFormat:@"Process: %@ [%d]",
+                                                     context.processName, context.processPID]]];
+    } else if (context.processName.length > 0) {
+        [menu addItem:[self detailMenuItemWithTitle:[NSString stringWithFormat:@"Process: %@",
+                                                     context.processName]]];
+    } else if (context.processPID > 0) {
+        [menu addItem:[self detailMenuItemWithTitle:[NSString stringWithFormat:@"Process PID: %d",
+                                                     context.processPID]]];
+    }
+
+    if (context.destinationPort > 0) {
+        [menu addItem:[self detailMenuItemWithTitle:[NSString stringWithFormat:@"Destination port: %ld",
+                                                     (long)context.destinationPort]]];
+    }
+
+    if (context.trustedAt) {
+        NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+        formatter.dateStyle = NSDateFormatterMediumStyle;
+        formatter.timeStyle = NSDateFormatterShortStyle;
+        NSString *trustedAt = [formatter stringFromDate:context.trustedAt];
+        [menu addItem:[self detailMenuItemWithTitle:[NSString stringWithFormat:@"Trusted at: %@", trustedAt]]];
+    }
+
+    if (stats && ipAddress.length > 0) {
+        NSArray<ConnectionTraffic *> *connections = [self connectionsForIP:ipAddress inStats:stats];
+        uint64_t totalBytes = [self totalBytesForIP:ipAddress inStats:stats];
+        if (connections.count > 0 || totalBytes > 0) {
+            [menu addItem:[NSMenuItem separatorItem]];
+            [menu addItem:[self detailHeaderMenuItemWithTitle:@"Active traffic"]];
+            if (connections.count > 0) {
+                [menu addItem:[self detailMenuItemWithTitle:[NSString stringWithFormat:@"Active connections: %lu",
+                                                             (unsigned long)connections.count]]];
+            }
+            if (totalBytes > 0) {
+                [menu addItem:[self detailMenuItemWithTitle:[NSString stringWithFormat:@"Active traffic: %@",
+                                                             [SNBByteFormatter stringFromBytes:totalBytes]]]];
+            }
+        }
+    }
+
+    NSDictionary<NSString *, id> *persisted = ipAddress.length > 0
+        ? [self persistedConnectionDetailsForIP:ipAddress]
+        : @{};
+    if (persisted.count > 0) {
+        NSString *source = persisted[@"sourceAddress"];
+        NSString *destination = persisted[@"destinationAddress"];
+        NSNumber *sourcePort = persisted[@"sourcePort"];
+        NSNumber *destinationPort = persisted[@"destinationPort"];
+        NSString *processName = persisted[@"processName"];
+        NSNumber *processPID = persisted[@"processPID"];
+        NSNumber *bytes = persisted[@"bytes"];
+        NSNumber *packets = persisted[@"packets"];
+        NSString *day = persisted[@"day"];
+
+        BOOL hasConnectionLine = (source.length > 0 && destination.length > 0);
+        BOOL hasProcessLine = (processName.length > 0 || processPID.intValue > 0);
+        BOOL hasTrafficLine = (bytes.unsignedLongLongValue > 0 || packets.unsignedLongLongValue > 0);
+
+        if (hasConnectionLine || hasProcessLine || hasTrafficLine || day.length > 0) {
+            [menu addItem:[NSMenuItem separatorItem]];
+            [menu addItem:[self detailHeaderMenuItemWithTitle:@"Last seen connection"]];
+            if (hasConnectionLine) {
+                NSString *line = [NSString stringWithFormat:@"%@:%ld → %@:%ld",
+                                  source,
+                                  (long)sourcePort.integerValue,
+                                  destination,
+                                  (long)destinationPort.integerValue];
+                [menu addItem:[self detailMenuItemWithTitle:line]];
+            }
+            if (hasProcessLine) {
+                if (processName.length > 0 && processPID.intValue > 0) {
+                    [menu addItem:[self detailMenuItemWithTitle:[NSString stringWithFormat:@"Process: %@ [%d]",
+                                                                 processName, processPID.intValue]]];
+                } else if (processName.length > 0) {
+                    [menu addItem:[self detailMenuItemWithTitle:[NSString stringWithFormat:@"Process: %@",
+                                                                 processName]]];
+                } else {
+                    [menu addItem:[self detailMenuItemWithTitle:[NSString stringWithFormat:@"Process PID: %d",
+                                                                 processPID.intValue]]];
+                }
+            }
+            if (hasTrafficLine) {
+                if (bytes.unsignedLongLongValue > 0) {
+                    [menu addItem:[self detailMenuItemWithTitle:[NSString stringWithFormat:@"Traffic: %@",
+                                                                 [SNBByteFormatter stringFromBytes:bytes.unsignedLongLongValue]]]];
+                }
+                if (packets.unsignedLongLongValue > 0) {
+                    [menu addItem:[self detailMenuItemWithTitle:[NSString stringWithFormat:@"Packets: %@",
+                                                                 packets]]];
+                }
+            }
+            if (day.length > 0) {
+                [menu addItem:[self detailMenuItemWithTitle:[NSString stringWithFormat:@"Persisted day: %@", day]]];
+            }
+        }
+    }
+
+    NSArray<NSMenuItem *> *historyItems = [self trustHistoryItemsForIP:ipAddress];
+    if (historyItems.count > 0) {
+        [menu addItem:[NSMenuItem separatorItem]];
+        for (NSMenuItem *item in historyItems) {
+            [menu addItem:item];
+        }
+    }
+
+    if (ipAddress.length > 0) {
+        [menu addItem:[NSMenuItem separatorItem]];
+        NSMenuItem *untrustItem = [[NSMenuItem alloc] initWithTitle:@"Untrust"
+                                                             action:@selector(moveTrustedIPToPreviousThreats:)
+                                                      keyEquivalent:@""];
+        untrustItem.target = self;
+        untrustItem.representedObject = ipAddress;
+        NSMutableAttributedString *untrustAttr = [[NSMutableAttributedString alloc] initWithString:@"Untrust"];
+        [untrustAttr addAttribute:NSForegroundColorAttributeName
+                            value:[NSColor systemRedColor]
+                            range:NSMakeRange(0, untrustAttr.length)];
+        untrustItem.attributedTitle = untrustAttr;
+        [menu addItem:untrustItem];
+    }
 }
 
 @end

@@ -5,6 +5,7 @@
 
 #import "SNBMenuThreatsSectionBuilder.h"
 #import "MenuBuilder+SectionSupport.h"
+#import "MenuBuilder+ThreatDisplay.h"
 #import "ThreatIntelModels.h"
 #import "TrustLearningModels.h"
 
@@ -328,19 +329,7 @@ threatIntelStatusMessage:(NSString *)threatIntelStatusMessage
                                    range:NSMakeRange(0, itemTitle.length)];
                     ipItem.attributedTitle = ipAttr;
 
-                    NSMenu *trustedSubmenu = [[NSMenu alloc] initWithTitle:@"Legitimate Connection Actions"];
-                    NSMenuItem *untrustItem = [[NSMenuItem alloc] initWithTitle:@"Untrust"
-                                                                         action:@selector(moveTrustedIPToPreviousThreats:)
-                                                                  keyEquivalent:@""];
-                    untrustItem.target = menuBuilder;
-                    untrustItem.representedObject = ctx.ipAddress;
-                    NSMutableAttributedString *untrustAttr = [[NSMutableAttributedString alloc] initWithString:@"Untrust"];
-                    [untrustAttr addAttribute:NSForegroundColorAttributeName
-                                        value:[NSColor systemRedColor]
-                                        range:NSMakeRange(0, untrustAttr.length)];
-                    untrustItem.attributedTitle = untrustAttr;
-                    [trustedSubmenu addItem:untrustItem];
-                    ipItem.submenu = trustedSubmenu;
+                    ipItem.submenu = [menuBuilder trustedIPDetailsSubmenuForContext:ctx stats:stats];
 
                     [menu addItem:ipItem];
                 }

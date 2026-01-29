@@ -19,7 +19,7 @@
 - (void)menuBuilder:(id)sender didRequestMapAction:(NSString *)action forIP:(NSString *)ipAddress;
 @end
 
-@interface MenuBuilder : NSObject <MapMenuViewDelegate>
+@interface MenuBuilder : NSObject <MapMenuViewDelegate, NSMenuDelegate>
 
 // Selected connection from map (for highlighting)
 @property (nonatomic, copy) NSString *selectedSourceIP;

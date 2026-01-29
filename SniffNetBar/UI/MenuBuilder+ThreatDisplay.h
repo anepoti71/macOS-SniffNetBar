@@ -7,7 +7,7 @@
 
 #import "MenuBuilder.h"
 
-@class TrafficStats, TIEnrichmentResponse, TIScoringResult, ConnectionTraffic, SNBTrustSuggestion;
+@class TrafficStats, TIEnrichmentResponse, TIScoringResult, ConnectionTraffic, SNBTrustSuggestion, SNBTrustContext;
 
 // Severity level for grouping
 typedef NS_ENUM(NSInteger, ThreatSeverityLevel) {
@@ -94,6 +94,10 @@ typedef NS_ENUM(NSInteger, ThreatSeverityLevel) {
 
 // Create trust history section for threat details
 - (NSArray<NSMenuItem *> *)trustHistoryItemsForIP:(NSString *)ipAddress;
+
+// Create details submenu for trusted IPs
+- (NSMenu *)trustedIPDetailsSubmenuForContext:(SNBTrustContext *)context
+                                        stats:(nullable TrafficStats *)stats;
 
 // Check if IP is currently trusted
 - (BOOL)isIPTrusted:(NSString *)ipAddress;
