@@ -228,6 +228,7 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
         // Expandable sections - collapsed by default for cleaner UI
         _showCleanConnections = NO;
         _showTrustedIPs = NO;
+        _trustedViewMode = SNBTrustedViewModeReason;
         _showAllAssets = NO;
         _showProviderDetails = NO;
         _trustedStore = [SNBTrustedIPStore sharedStore];
@@ -2499,6 +2500,16 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
 - (void)toggleShowTrustedIPs {
     self.showTrustedIPs = !self.showTrustedIPs;
     SNBLogUIDebug("Toggled trusted IPs: %d", self.showTrustedIPs);
+    [self requestFullVisualizationRefresh];
+}
+
+- (void)selectTrustedViewMode:(NSMenuItem *)sender {
+    NSNumber *modeValue = [sender.representedObject isKindOfClass:[NSNumber class]] ? sender.representedObject : nil;
+    if (!modeValue) {
+        return;
+    }
+    self.trustedViewMode = modeValue.integerValue;
+    SNBLogUIDebug("Selected trusted view mode: %ld", (long)self.trustedViewMode);
     [self requestFullVisualizationRefresh];
 }
 

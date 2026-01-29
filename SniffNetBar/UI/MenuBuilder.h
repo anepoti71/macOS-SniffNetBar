@@ -19,6 +19,12 @@
 - (void)menuBuilder:(id)sender didRequestMapAction:(NSString *)action forIP:(NSString *)ipAddress;
 @end
 
+typedef NS_ENUM(NSInteger, SNBTrustedViewMode) {
+    SNBTrustedViewModeReason = 0,
+    SNBTrustedViewModeProcess = 1,
+    SNBTrustedViewModeHostname = 2
+};
+
 @interface MenuBuilder : NSObject <MapMenuViewDelegate, NSMenuDelegate>
 
 // Selected connection from map (for highlighting)
@@ -48,6 +54,7 @@
 // Expandable sections state
 @property (nonatomic, assign) BOOL showCleanConnections;
 @property (nonatomic, assign) BOOL showTrustedIPs;
+@property (nonatomic, assign) SNBTrustedViewMode trustedViewMode;
 @property (nonatomic, assign) BOOL showAllAssets;
 @property (nonatomic, assign) BOOL showProviderDetails;
 @property (nonatomic, assign) BOOL showLowSeverityThreats;
@@ -96,6 +103,7 @@
 - (void)toggleShowProviderDetails;
 - (void)toggleShowLowSeverityThreats;
 - (void)toggleShowHistoricalThreats;
+- (void)selectTrustedViewMode:(NSMenuItem *)sender;
 
 // Main section toggles
 - (void)toggleSectionThreats;

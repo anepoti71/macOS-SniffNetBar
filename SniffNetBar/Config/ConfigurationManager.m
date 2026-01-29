@@ -81,6 +81,7 @@ BOOL SNBConfigurationManagerIsInitializing(void) {
         @"DeviceListRefreshInterval": @30.0,
         @"MaxTopHostsToShow": @5,
         @"MaxTopConnectionsToShow": @10,
+        @"MaxTrustedIPsPerGroup": @10,
         @"MapMenuViewHeight": @320.0,
         @"MenuFixedWidth": @480.0,
         @"ReconnectDelay": @5.0,
@@ -137,6 +138,9 @@ BOOL SNBConfigurationManagerIsInitializing(void) {
     }
     if (self.maxTopHostsToShow == 0 || self.maxTopConnectionsToShow == 0) {
         [issues addObject:@"MaxTopHostsToShow and MaxTopConnectionsToShow must be greater than 0."];
+    }
+    if (self.maxTrustedIPsPerGroup == 0) {
+        [issues addObject:@"MaxTrustedIPsPerGroup must be greater than 0."];
     }
     if (self.maxReconnectAttempts == 0) {
         [issues addObject:@"MaxReconnectAttempts must be greater than 0."];
@@ -251,6 +255,11 @@ BOOL SNBConfigurationManagerIsInitializing(void) {
 
 - (NSUInteger)maxTopConnectionsToShow {
     NSNumber *value = self.configuration[@"MaxTopConnectionsToShow"];
+    return value ? [value unsignedIntegerValue] : 10;
+}
+
+- (NSUInteger)maxTrustedIPsPerGroup {
+    NSNumber *value = self.configuration[@"MaxTrustedIPsPerGroup"];
     return value ? [value unsignedIntegerValue] : 10;
 }
 

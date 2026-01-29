@@ -33,6 +33,7 @@ extern NSString * const kIpInfoAPITokenIdentifier;
 @property (nonatomic, readonly) NSTimeInterval deviceListRefreshInterval;
 @property (nonatomic, readonly) NSUInteger maxTopHostsToShow;
 @property (nonatomic, readonly) NSUInteger maxTopConnectionsToShow;
+@property (nonatomic, readonly) NSUInteger maxTrustedIPsPerGroup;
 @property (nonatomic, readonly) CGFloat mapMenuViewHeight;
 @property (nonatomic, readonly) CGFloat menuFixedWidth;
 
