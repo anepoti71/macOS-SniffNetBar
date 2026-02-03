@@ -294,152 +294,154 @@ threatIntelStatusMessage:(NSString *)threatIntelStatusMessage
             [menu addItem:[NSMenuItem separatorItem]];
         }
 
-        NSArray<SNBTrustContext *> *trustedContexts = [menuBuilder.trustedStore allTrustedIPContexts];
-        if (trustedContexts.count > 0) {
-            NSString *expandIndicator = menuBuilder.showTrustedIPs ? @"▼" : @"▶";
-            NSString *trustedTitle = [NSString stringWithFormat:@"%@ Legitimate Connections (%lu)",
-                                     expandIndicator, (unsigned long)trustedContexts.count];
-            NSMenuItem *trustedToggle = [[NSMenuItem alloc] initWithTitle:trustedTitle
-                                                                  action:@selector(toggleShowTrustedIPs)
-                                                           keyEquivalent:@""];
-            trustedToggle.target = menuBuilder;
-
-            NSMutableAttributedString *trustedAttr = [[NSMutableAttributedString alloc] initWithString:trustedTitle];
-            [trustedAttr addAttribute:NSForegroundColorAttributeName
-                                value:[NSColor labelColor]
-                                range:NSMakeRange(0, trustedTitle.length)];
-            trustedToggle.attributedTitle = trustedAttr;
-            [menu addItem:trustedToggle];
-
-            if (menuBuilder.showTrustedIPs) {
-                NSUInteger maxPerGroup = menuBuilder.configuration.maxTrustedIPsPerGroup;
-                if (maxPerGroup == 0) {
-                    maxPerGroup = 10;
-                }
-
-                NSString *viewLabel = @"Reason";
-                NSString *(^groupKey)(SNBTrustContext *) = ^NSString *(SNBTrustContext *ctx) {
-                    if (ctx.reason == SNBTrustReasonUnspecified) {
-                        return nil;
-                    }
-                    NSString *reason = [SNBTrustContext displayStringForReason:ctx.reason];
-                    return reason.length > 0 ? reason : nil;
-                };
-
-                if (menuBuilder.trustedViewMode == SNBTrustedViewModeProcess) {
-                    viewLabel = @"Process";
-                    groupKey = ^NSString *(SNBTrustContext *ctx) {
-                        return ctx.processName.length > 0 ? ctx.processName : nil;
-                    };
-                } else if (menuBuilder.trustedViewMode == SNBTrustedViewModeHostname) {
-                    viewLabel = @"Hostname";
-                    groupKey = ^NSString *(SNBTrustContext *ctx) {
-                        return ctx.hostname.length > 0 ? ctx.hostname : nil;
-                    };
-                }
-
-                NSString *viewTitle = [NSString stringWithFormat:@"View by: %@", viewLabel];
-                NSMenuItem *viewItem = [[NSMenuItem alloc] initWithTitle:viewTitle action:nil keyEquivalent:@""];
-                NSMenu *viewMenu = [[NSMenu alloc] initWithTitle:@"View by"];
-                NSArray<NSNumber *> *modes = @[
-                    @(SNBTrustedViewModeReason),
-                    @(SNBTrustedViewModeProcess),
-                    @(SNBTrustedViewModeHostname)
-                ];
-                NSArray<NSString *> *titles = @[ @"Reason", @"Process", @"Hostname" ];
-                for (NSUInteger i = 0; i < modes.count; i++) {
-                    NSMenuItem *modeItem = [[NSMenuItem alloc] initWithTitle:titles[i]
-                                                                      action:@selector(selectTrustedViewMode:)
+        if (menuBuilder.showLegitimateConnections) {
+            NSArray<SNBTrustContext *> *trustedContexts = [menuBuilder.trustedStore allTrustedIPContexts];
+            if (trustedContexts.count > 0) {
+                NSString *expandIndicator = menuBuilder.showTrustedIPs ? @"▼" : @"▶";
+                NSString *trustedTitle = [NSString stringWithFormat:@"%@ Legitimate Connections (%lu)",
+                                         expandIndicator, (unsigned long)trustedContexts.count];
+                NSMenuItem *trustedToggle = [[NSMenuItem alloc] initWithTitle:trustedTitle
+                                                                      action:@selector(toggleShowTrustedIPs)
                                                                keyEquivalent:@""];
-                    modeItem.target = menuBuilder;
-                    modeItem.representedObject = modes[i];
-                    modeItem.state = (menuBuilder.trustedViewMode == modes[i].integerValue)
-                        ? NSControlStateValueOn
-                        : NSControlStateValueOff;
-                    [viewMenu addItem:modeItem];
-                }
-                viewItem.submenu = viewMenu;
-                [menu addItem:viewItem];
-                [menu addItem:[NSMenuItem separatorItem]];
+                trustedToggle.target = menuBuilder;
 
-                NSMutableDictionary<NSString *, NSMutableArray<SNBTrustContext *> *> *groups =
-                    [NSMutableDictionary dictionary];
-                NSMutableArray<NSString *> *groupOrder = [NSMutableArray array];
-                for (SNBTrustContext *ctx in trustedContexts) {
-                    NSString *key = groupKey(ctx);
-                    if (key.length == 0) {
-                        continue;
-                    }
-                    NSMutableArray<SNBTrustContext *> *bucket = groups[key];
-                    if (!bucket) {
-                        bucket = [NSMutableArray array];
-                        groups[key] = bucket;
-                        [groupOrder addObject:key];
-                    }
-                    [bucket addObject:ctx];
-                }
+                NSMutableAttributedString *trustedAttr = [[NSMutableAttributedString alloc] initWithString:trustedTitle];
+                [trustedAttr addAttribute:NSForegroundColorAttributeName
+                                    value:[NSColor labelColor]
+                                    range:NSMakeRange(0, trustedTitle.length)];
+                trustedToggle.attributedTitle = trustedAttr;
+                [menu addItem:trustedToggle];
 
-                if (groupOrder.count == 0) {
-                    NSString *emptyTitle = [NSString stringWithFormat:@"No entries with %@", viewLabel];
-                    [menu addItem:[menuBuilder styledMenuItemWithTitle:emptyTitle style:@"data"]];
-                } else {
-                    [groupOrder sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
-                        NSUInteger countA = groups[a].count;
-                        NSUInteger countB = groups[b].count;
-                        if (countA == countB) {
-                            return [a localizedCaseInsensitiveCompare:b];
+                if (menuBuilder.showTrustedIPs) {
+                    NSUInteger maxPerGroup = menuBuilder.configuration.maxTrustedIPsPerGroup;
+                    if (maxPerGroup == 0) {
+                        maxPerGroup = 10;
+                    }
+
+                    NSString *viewLabel = @"Reason";
+                    NSString *(^groupKey)(SNBTrustContext *) = ^NSString *(SNBTrustContext *ctx) {
+                        if (ctx.reason == SNBTrustReasonUnspecified) {
+                            return nil;
                         }
-                        return countA > countB ? NSOrderedAscending : NSOrderedDescending;
-                    }];
+                        NSString *reason = [SNBTrustContext displayStringForReason:ctx.reason];
+                        return reason.length > 0 ? reason : nil;
+                    };
 
-                    NSUInteger total = 0;
-                    for (NSString *key in groupOrder) {
-                        total += groups[key].count;
+                    if (menuBuilder.trustedViewMode == SNBTrustedViewModeProcess) {
+                        viewLabel = @"Process";
+                        groupKey = ^NSString *(SNBTrustContext *ctx) {
+                            return ctx.processName.length > 0 ? ctx.processName : nil;
+                        };
+                    } else if (menuBuilder.trustedViewMode == SNBTrustedViewModeHostname) {
+                        viewLabel = @"Hostname";
+                        groupKey = ^NSString *(SNBTrustContext *ctx) {
+                            return ctx.hostname.length > 0 ? ctx.hostname : nil;
+                        };
                     }
-                    NSString *headerTitle = [NSString stringWithFormat:@"Grouped by %@ (%lu total)",
-                                             viewLabel, (unsigned long)total];
-                    [menu addItem:[menuBuilder styledMenuItemWithTitle:headerTitle style:@"subheader"]];
 
-                    for (NSString *key in groupOrder) {
-                        NSArray<SNBTrustContext *> *bucket = groups[key];
-                        NSString *groupTitle = [NSString stringWithFormat:@"  %@: %@ (%lu)",
-                                                viewLabel, key, (unsigned long)bucket.count];
-                        [menu addItem:[menuBuilder styledMenuItemWithTitle:groupTitle style:@"subheader"]];
+                    NSString *viewTitle = [NSString stringWithFormat:@"View by: %@", viewLabel];
+                    NSMenuItem *viewItem = [[NSMenuItem alloc] initWithTitle:viewTitle action:nil keyEquivalent:@""];
+                    NSMenu *viewMenu = [[NSMenu alloc] initWithTitle:@"View by"];
+                    NSArray<NSNumber *> *modes = @[
+                        @(SNBTrustedViewModeReason),
+                        @(SNBTrustedViewModeProcess),
+                        @(SNBTrustedViewModeHostname)
+                    ];
+                    NSArray<NSString *> *titles = @[ @"Reason", @"Process", @"Hostname" ];
+                    for (NSUInteger i = 0; i < modes.count; i++) {
+                        NSMenuItem *modeItem = [[NSMenuItem alloc] initWithTitle:titles[i]
+                                                                          action:@selector(selectTrustedViewMode:)
+                                                                   keyEquivalent:@""];
+                        modeItem.target = menuBuilder;
+                        modeItem.representedObject = modes[i];
+                        modeItem.state = (menuBuilder.trustedViewMode == modes[i].integerValue)
+                            ? NSControlStateValueOn
+                            : NSControlStateValueOff;
+                        [viewMenu addItem:modeItem];
+                    }
+                    viewItem.submenu = viewMenu;
+                    [menu addItem:viewItem];
+                    [menu addItem:[NSMenuItem separatorItem]];
 
-                        NSUInteger limit = MIN(bucket.count, maxPerGroup);
-                        for (NSUInteger i = 0; i < limit; i++) {
-                            SNBTrustContext *ctx = bucket[i];
-                            if (ctx.ipAddress.length == 0) {
-                                continue;
+                    NSMutableDictionary<NSString *, NSMutableArray<SNBTrustContext *> *> *groups =
+                        [NSMutableDictionary dictionary];
+                    NSMutableArray<NSString *> *groupOrder = [NSMutableArray array];
+                    for (SNBTrustContext *ctx in trustedContexts) {
+                        NSString *key = groupKey(ctx);
+                        if (key.length == 0) {
+                            continue;
+                        }
+                        NSMutableArray<SNBTrustContext *> *bucket = groups[key];
+                        if (!bucket) {
+                            bucket = [NSMutableArray array];
+                            groups[key] = bucket;
+                            [groupOrder addObject:key];
+                        }
+                        [bucket addObject:ctx];
+                    }
+
+                    if (groupOrder.count == 0) {
+                        NSString *emptyTitle = [NSString stringWithFormat:@"No entries with %@", viewLabel];
+                        [menu addItem:[menuBuilder styledMenuItemWithTitle:emptyTitle style:@"data"]];
+                    } else {
+                        [groupOrder sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+                            NSUInteger countA = groups[a].count;
+                            NSUInteger countB = groups[b].count;
+                            if (countA == countB) {
+                                return [a localizedCaseInsensitiveCompare:b];
                             }
-                            NSString *itemTitle = [NSString stringWithFormat:@"    %@", ctx.ipAddress];
-                            NSMenuItem *ipItem = [[NSMenuItem alloc] initWithTitle:itemTitle
-                                                                            action:nil
-                                                                     keyEquivalent:@""];
-                            ipItem.state = NSControlStateValueOn;
+                            return countA > countB ? NSOrderedAscending : NSOrderedDescending;
+                        }];
 
-                            NSMutableAttributedString *ipAttr =
-                                [[NSMutableAttributedString alloc] initWithString:itemTitle];
-                            [ipAttr addAttribute:NSForegroundColorAttributeName
-                                           value:[NSColor secondaryLabelColor]
-                                           range:NSMakeRange(0, itemTitle.length)];
-                            [ipAttr addAttribute:NSFontAttributeName
-                                           value:[NSFont systemFontOfSize:11.0]
-                                           range:NSMakeRange(0, itemTitle.length)];
-                            ipItem.attributedTitle = ipAttr;
-                            ipItem.submenu = [menuBuilder trustedIPDetailsSubmenuForContext:ctx stats:stats];
-                            [menu addItem:ipItem];
+                        NSUInteger total = 0;
+                        for (NSString *key in groupOrder) {
+                            total += groups[key].count;
                         }
+                        NSString *headerTitle = [NSString stringWithFormat:@"Grouped by %@ (%lu total)",
+                                                 viewLabel, (unsigned long)total];
+                        [menu addItem:[menuBuilder styledMenuItemWithTitle:headerTitle style:@"subheader"]];
 
-                        if (bucket.count > limit) {
-                            NSString *moreTitle = [NSString stringWithFormat:@"    … and %lu more",
-                                                   (unsigned long)(bucket.count - limit)];
-                            [menu addItem:[menuBuilder styledMenuItemWithTitle:moreTitle style:@"data"]];
+                        for (NSString *key in groupOrder) {
+                            NSArray<SNBTrustContext *> *bucket = groups[key];
+                            NSString *groupTitle = [NSString stringWithFormat:@"  %@: %@ (%lu)",
+                                                    viewLabel, key, (unsigned long)bucket.count];
+                            [menu addItem:[menuBuilder styledMenuItemWithTitle:groupTitle style:@"subheader"]];
+
+                            NSUInteger limit = MIN(bucket.count, maxPerGroup);
+                            for (NSUInteger i = 0; i < limit; i++) {
+                                SNBTrustContext *ctx = bucket[i];
+                                if (ctx.ipAddress.length == 0) {
+                                    continue;
+                                }
+                                NSString *itemTitle = [NSString stringWithFormat:@"    %@", ctx.ipAddress];
+                                NSMenuItem *ipItem = [[NSMenuItem alloc] initWithTitle:itemTitle
+                                                                                action:nil
+                                                                         keyEquivalent:@""];
+                                ipItem.state = NSControlStateValueOn;
+
+                                NSMutableAttributedString *ipAttr =
+                                    [[NSMutableAttributedString alloc] initWithString:itemTitle];
+                                [ipAttr addAttribute:NSForegroundColorAttributeName
+                                               value:[NSColor secondaryLabelColor]
+                                               range:NSMakeRange(0, itemTitle.length)];
+                                [ipAttr addAttribute:NSFontAttributeName
+                                               value:[NSFont systemFontOfSize:11.0]
+                                               range:NSMakeRange(0, itemTitle.length)];
+                                ipItem.attributedTitle = ipAttr;
+                                ipItem.submenu = [menuBuilder trustedIPDetailsSubmenuForContext:ctx stats:stats];
+                                [menu addItem:ipItem];
+                            }
+
+                            if (bucket.count > limit) {
+                                NSString *moreTitle = [NSString stringWithFormat:@"    … and %lu more",
+                                                       (unsigned long)(bucket.count - limit)];
+                                [menu addItem:[menuBuilder styledMenuItemWithTitle:moreTitle style:@"data"]];
+                            }
                         }
                     }
                 }
+                [menu addItem:[NSMenuItem separatorItem]];
             }
-            [menu addItem:[NSMenuItem separatorItem]];
         }
 
         if (menuBuilder.showProviderDetails) {

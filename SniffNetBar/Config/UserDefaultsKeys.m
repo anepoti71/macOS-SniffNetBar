@@ -18,6 +18,7 @@ SNBUserDefaultsKey const SNBUserDefaultsKeyShowTopHosts = @"ShowTopHosts";
 SNBUserDefaultsKey const SNBUserDefaultsKeyShowTopConnections = @"ShowTopConnections";
 SNBUserDefaultsKey const SNBUserDefaultsKeyShowMap = @"ShowMap";
 SNBUserDefaultsKey const SNBUserDefaultsKeyShowProcessActivity = @"ShowProcessActivity";
+SNBUserDefaultsKey const SNBUserDefaultsKeyShowLegitimateConnections = @"ShowLegitimateConnections";
 SNBUserDefaultsKey const SNBUserDefaultsKeyEnableProactiveSuggestions = @"EnableProactiveSuggestions";
 SNBUserDefaultsKey const SNBUserDefaultsKeySuggestionConfidenceThreshold = @"SuggestionConfidenceThreshold";
 SNBUserDefaultsKey const SNBUserDefaultsKeyAdaptiveProviderWeights = @"AdaptiveProviderWeights";

@@ -262,6 +262,12 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
             _showProcessActivity = YES;
         }
 
+        if ([defaults objectForKey:SNBUserDefaultsKeyShowLegitimateConnections]) {
+            _showLegitimateConnections = [defaults boolForKey:SNBUserDefaultsKeyShowLegitimateConnections];
+        } else {
+            _showLegitimateConnections = YES;
+        }
+
         if ([defaults objectForKey:SNBUserDefaultsKeyDailyStatisticsEnabled]) {
             _dailyStatsEnabled = [defaults boolForKey:SNBUserDefaultsKeyDailyStatisticsEnabled];
         } else {
@@ -354,6 +360,14 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
     if (_showProcessActivity != showProcessActivity) {
         _showProcessActivity = showProcessActivity;
         [[NSUserDefaults standardUserDefaults] setBool:showProcessActivity forKey:SNBUserDefaultsKeyShowProcessActivity];
+    }
+}
+
+- (void)setShowLegitimateConnections:(BOOL)showLegitimateConnections {
+    if (_showLegitimateConnections != showLegitimateConnections) {
+        _showLegitimateConnections = showLegitimateConnections;
+        [[NSUserDefaults standardUserDefaults] setBool:showLegitimateConnections
+                                                forKey:SNBUserDefaultsKeyShowLegitimateConnections];
     }
 }
 
@@ -1407,6 +1421,13 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
     togglePromotionAgent.target = target;
     togglePromotionAgent.state = self.promotionAgentEnabled ? NSControlStateValueOn : NSControlStateValueOff;
     [settingsSubmenu addItem:togglePromotionAgent];
+
+    NSMenuItem *toggleLegitimateConnections = [[NSMenuItem alloc] initWithTitle:@"Show Legitimate Connections"
+                                                                         action:@selector(toggleShowLegitimateConnections:)
+                                                                  keyEquivalent:@""];
+    toggleLegitimateConnections.target = target;
+    toggleLegitimateConnections.state = self.showLegitimateConnections ? NSControlStateValueOn : NSControlStateValueOff;
+    [settingsSubmenu addItem:toggleLegitimateConnections];
 
     [settingsSubmenu addItem:[NSMenuItem separatorItem]];
 

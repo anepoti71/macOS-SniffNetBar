@@ -37,6 +37,7 @@ typedef NS_ENUM(NSInteger, SNBTrustedViewMode) {
 @property (nonatomic, assign) BOOL showTopConnections;
 @property (nonatomic, assign) BOOL showMap;
 @property (nonatomic, assign) BOOL showProcessActivity;
+@property (nonatomic, assign) BOOL showLegitimateConnections;
 @property (nonatomic, assign) BOOL dailyStatsEnabled;
 @property (nonatomic, assign) BOOL statsReportAvailable;
 @property (nonatomic, assign) BOOL debugEnabled;

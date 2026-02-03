@@ -108,6 +108,7 @@
         SNBUserDefaultsKeyEnableProactiveSuggestions: @YES,
         SNBUserDefaultsKeySuggestionConfidenceThreshold: @0.7,
         SNBUserDefaultsKeyAdaptiveProviderWeights: @NO,
+        SNBUserDefaultsKeyShowLegitimateConnections: @YES,
         SNBUserDefaultsKeyOpenAtLogin: @NO,
         SNBUserDefaultsKeyThreatIntelOptInPromptShown: @NO
     };
@@ -539,6 +540,11 @@
 
 - (void)toggleShowProcessActivity:(NSMenuItem *)sender {
     self.menuBuilder.showProcessActivity = !self.menuBuilder.showProcessActivity;
+    [self updateMenu];
+}
+
+- (void)toggleShowLegitimateConnections:(NSMenuItem *)sender {
+    self.menuBuilder.showLegitimateConnections = !self.menuBuilder.showLegitimateConnections;
     [self updateMenu];
 }
 
