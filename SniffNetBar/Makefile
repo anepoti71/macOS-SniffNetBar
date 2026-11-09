@@ -18,6 +18,7 @@ INSTALL_DIR = $(HOME)/Applications
 INSTALL_APP = $(INSTALL_DIR)/$(APP_NAME).app
 INFO_PLIST_SRC = Info.plist
 ICON_SRC = ../resources/logo/icon_macos.png
+APP_ICNS = $(BUILD_DIR)/sniffnet.icns
 OUI_SRC = ../resources/oui.csv
 FRAMEWORKS = -framework Cocoa -framework SystemConfiguration -framework WebKit -framework CoreLocation -framework Security -framework CoreML -framework ServiceManagement
 PCAP_LIBS = -lpcap
@@ -109,8 +110,9 @@ CODESIGN_IDENTITY ?=
 # Targets
 all: helper $(APP_BUNDLE) tools
 
-$(APP_BUNDLE): $(MACOS_DIR)/$(APP_NAME) $(HELPER_BINARY) $(BUILD_DIR)/unregister_helper $(BUILD_DIR)/ModelingXPCService.xpc $(INFO_PLIST_SRC) | $(RESOURCES_DIR)
+$(APP_BUNDLE): $(MACOS_DIR)/$(APP_NAME) $(HELPER_BINARY) $(BUILD_DIR)/unregister_helper $(BUILD_DIR)/ModelingXPCService.xpc $(INFO_PLIST_SRC) $(APP_ICNS) | $(RESOURCES_DIR)
 	@cp $(INFO_PLIST_SRC) $(CONTENTS_DIR)/Info.plist
+	@cp $(APP_ICNS) $(RESOURCES_DIR)/sniffnet.icns
 	@cp Config/Configuration.plist $(RESOURCES_DIR)/Configuration.plist
 	@cp $(ICON_SRC) $(RESOURCES_DIR)/icon_macos.png
 	@cp $(OUI_SRC) $(RESOURCES_DIR)/oui.csv
@@ -253,6 +255,16 @@ $(BUILD_DIR):
 
 $(MACOS_DIR):
 	mkdir -p $(MACOS_DIR)
+
+# App icon (CFBundleIconFile = sniffnet) generated from the 512px logo
+$(APP_ICNS): $(ICON_SRC)
+	@rm -rf $(BUILD_DIR)/sniffnet.iconset && mkdir -p $(BUILD_DIR)/sniffnet.iconset
+	@for s in 16 32 128 256 512; do \
+		sips -z $$s $$s $(ICON_SRC) --out $(BUILD_DIR)/sniffnet.iconset/icon_$${s}x$${s}.png >/dev/null; \
+		d=$$((s*2)); [ $$d -le 512 ] && sips -z $$d $$d $(ICON_SRC) --out $(BUILD_DIR)/sniffnet.iconset/icon_$${s}x$${s}@2x.png >/dev/null; \
+	done; true
+	@iconutil -c icns $(BUILD_DIR)/sniffnet.iconset -o $@
+	@rm -rf $(BUILD_DIR)/sniffnet.iconset
 
 $(RESOURCES_DIR):
 	mkdir -p $(RESOURCES_DIR)

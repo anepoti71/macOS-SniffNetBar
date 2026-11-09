@@ -62,6 +62,7 @@
 
 - (NSMenuItem *)mapMenuItemIfNeeded;
 - (void)tearDownMapMenuItem;
+- (void)openMapWindow:(id)sender;
 
 - (NSArray<NSDictionary *> *)maliciousConnectionsFromStats:(TrafficStats *)stats
                                         threatIntelResults:(NSDictionary<NSString *, TIEnrichmentResponse *> *)threatIntelResults;

@@ -71,6 +71,30 @@ static const NSTimeInterval kRenderDebounceInterval = 0.25;
 @property (nonatomic, copy) SNBTimerID cleanupTimerID;
 @end
 
+// WebKit on macOS 27.2+ no longer loads file:// subresources for pages loaded via
+// -loadHTMLString:baseURL: with a file base URL, so Leaflet never ran and the map
+// stayed blank. Inline the bundled vendor CSS/JS into the HTML instead.
+static NSString *SNBInlineVendorAssets(NSString *html, NSURL *resourceURL) {
+    NSArray<NSArray<NSString *> *> *assets = @[
+        @[@"<link rel='stylesheet' href='vendor/leaflet/leaflet.css'>", @"vendor/leaflet/leaflet.css", @"style"],
+        @[@"<script src='vendor/leaflet/leaflet.js'></script>", @"vendor/leaflet/leaflet.js", @"script"],
+        @[@"<script src='vendor/leaflet-heat/leaflet-heat.js'></script>", @"vendor/leaflet-heat/leaflet-heat.js", @"script"],
+    ];
+    NSMutableString *result = [html mutableCopy];
+    for (NSArray<NSString *> *asset in assets) {
+        NSURL *fileURL = [resourceURL URLByAppendingPathComponent:asset[1]];
+        NSError *error = nil;
+        NSString *contents = [NSString stringWithContentsOfURL:fileURL encoding:NSUTF8StringEncoding error:&error];
+        if (!contents) {
+            SNBLogUIError("Failed to read map asset %{public}@: %{public}@", asset[1], error);
+            continue;
+        }
+        NSString *inlined = [NSString stringWithFormat:@"<%@>%@</%@>", asset[2], contents, asset[2]];
+        [result replaceOccurrencesOfString:asset[0] withString:inlined options:0 range:NSMakeRange(0, result.length)];
+    }
+    return result;
+}
+
 @implementation MapMenuView
 
 static inline uint64_t SNBHashCombine(uint64_t hash, uint64_t value) {
@@ -121,6 +145,11 @@ static uint64_t SNBHashConnectionTuple(ConnectionTraffic *connection) {
                 "  }"
                 "  origLog.apply(console,arguments);"
                 "};"
+                "window.addEventListener('error',function(e){"
+                "  var t=e.target;"
+                "  var src=(t&&t!==window&&(t.src||t.href))?(' resource='+(t.src||t.href)):'';"
+                "  console.log('window.error: '+(e.message||'')+' @'+(e.filename||'')+':'+(e.lineno||0)+src);"
+                "},true);"
                 "})();";
             WKUserScript *script = [[WKUserScript alloc] initWithSource:consoleScript
                                                           injectionTime:WKUserScriptInjectionTimeAtDocumentStart
@@ -1627,6 +1656,7 @@ static uint64_t SNBHashConnectionTuple(ConnectionTraffic *connection) {
 @"</html>\n"
 , lineColor, lineColor, isDetachedFlag, (long)lineWeight, lineColor, lineOpacity];
     NSURL *resourceURL = [[NSBundle mainBundle] resourceURL];
+    html = SNBInlineVendorAssets(html, resourceURL);
     [self.webView loadHTMLString:html baseURL:resourceURL];
 }
 
@@ -1850,6 +1880,18 @@ static uint64_t SNBHashConnectionTuple(ConnectionTraffic *connection) {
 
 #pragma mark - WKNavigationDelegate
 
+- (void)webView:(WKWebView *)webView didFailNavigation:(WKNavigation *)navigation withError:(NSError *)error {
+    SNBLogUIError("Map navigation failed: %{public}@", error);
+}
+
+- (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)navigation withError:(NSError *)error {
+    SNBLogUIError("Map provisional navigation failed: %{public}@", error);
+}
+
+- (void)webViewWebContentProcessDidTerminate:(WKWebView *)webView {
+    SNBLogUIError("Map web content process terminated");
+}
+
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
     self.mapReady = YES;
     [self markRenderDataDirty];
@@ -1862,7 +1904,7 @@ static uint64_t SNBHashConnectionTuple(ConnectionTraffic *connection) {
       didReceiveScriptMessage:(WKScriptMessage *)message {
     if ([message.name isEqualToString:@"consoleLog"]) {
         NSString *logMessage = [message.body description];
-        SNBLogUIDebug("[JS] %s", logMessage.UTF8String);
+        SNBLogUIDebug("[JS] %{public}s", logMessage.UTF8String);
         return;
     }
 

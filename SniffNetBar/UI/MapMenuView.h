@@ -49,6 +49,7 @@ typedef NS_ENUM(NSInteger, SNBMapLayerType) {
                     blockedIPs:(NSSet<NSString *> *)blockedIPs;
 
 /// Toggle between standard and satellite base layers
+- (void)openDetachedWindow;
 - (void)toggleSatelliteLayer;
 
 /// Toggle heat map overlay on/off

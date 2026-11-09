@@ -1563,6 +1563,26 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
     return self.mapMenuItem;
 }
 
+// macOS 27.2 does not composite a WKWebView hosted inside an NSMenu (it stays
+// blank white), so the map is shown in its own window instead of in the menu.
+- (void)openMapWindow:(id)sender {
+    (void)sender;
+    if (!self.mapMenuView) {
+        ConfigurationManager *config = self.configuration;
+        self.mapMenuView = [[MapMenuView alloc] initWithFrame:NSMakeRect(0, 0, config.menuFixedWidth, config.mapMenuViewHeight)];
+        self.mapMenuView.providerName = self.mapProviderName;
+        self.mapMenuView.delegate = self;
+    }
+    if (self.lastTrafficStats) {
+        NSArray<ConnectionTraffic *> *mapConnections = [self cachedMapConnectionsForStats:self.lastTrafficStats];
+        [self.mapMenuView updateWithConnections:mapConnections
+                             threatIntelResults:self.lastThreatIntelResults ?: @{}
+                                      blockedIPs:self.blockedIPs];
+    }
+    [self.mapMenuView openDetachedWindow];
+    [NSApp activateIgnoringOtherApps:YES];
+}
+
 - (void)tearDownMapMenuItem {
     if (self.mapMenuItem) {
         self.mapMenuItem.view = nil;
@@ -2274,10 +2294,6 @@ static NSSet<NSString *> *SNBLocalIPAddresses(void) {
 
     [self.dynamicStatItemInfo removeAllObjects];
     [self.detailStatItemInfo removeAllObjects];
-
-    if (self.showMap && self.menuIsOpen) {
-        [self mapMenuItemIfNeeded];
-    }
 
     [visualizationSubmenu removeAllItems];
     [self.threatsSectionBuilder appendToMenu:visualizationSubmenu

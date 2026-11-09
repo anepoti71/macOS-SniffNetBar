@@ -22,26 +22,39 @@
 }
 
 + (NSArray<NetworkDevice *> *)listAllDevices {
-    __block NSArray<NetworkDevice *> *devices = @[];
-    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+    // The privileged helper may be restarting (e.g. after an app update replaced
+    // its binary), which makes the first XPC call fail with "Couldn't communicate
+    // with a helper application". Retry a few times before giving up.
+    static const NSInteger kMaxAttempts = 3;
+    for (NSInteger attempt = 1; attempt <= kMaxAttempts; attempt++) {
+        __block NSArray<NetworkDevice *> *devices = @[];
+        __block BOOL failed = NO;
+        dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
 
-    [[SNBPrivilegedHelperClient sharedClient] enumerateDevicesWithCompletion:^(NSArray<NetworkDevice *> *devs, NSError *error) {
-        if (error) {
-            SNBLogNetworkError("Error enumerating devices: %{public}s", error.localizedDescription.UTF8String);
-        } else if (devs) {
-            devices = devs;
+        [[SNBPrivilegedHelperClient sharedClient] enumerateDevicesWithCompletion:^(NSArray<NetworkDevice *> *devs, NSError *error) {
+            if (error) {
+                SNBLogNetworkError("Error enumerating devices (attempt %ld): %{public}s",
+                                   (long)attempt, error.localizedDescription.UTF8String);
+                failed = YES;
+            } else if (devs) {
+                devices = devs;
+            }
+            dispatch_semaphore_signal(semaphore);
+        }];
+
+        dispatch_time_t timeout = dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC);
+        if (dispatch_semaphore_wait(semaphore, timeout) != 0) {
+            SNBLogNetworkWarn("Timeout waiting for device enumeration");
+            return @[];
         }
-        dispatch_semaphore_signal(semaphore);
-    }];
-
-    dispatch_time_t timeout = dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC);
-    long waitResult = dispatch_semaphore_wait(semaphore, timeout);
-    if (waitResult != 0) {
-        SNBLogNetworkWarn("Timeout waiting for device enumeration");
-        return @[];
+        if (!failed) {
+            return devices;
+        }
+        if (attempt < kMaxAttempts) {
+            [NSThread sleepForTimeInterval:1.0];
+        }
     }
-
-    return devices;
+    return @[];
 }
 
 + (NetworkDevice *)defaultDevice {

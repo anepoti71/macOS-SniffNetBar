@@ -42,22 +42,21 @@
     detailsItem.submenu = detailsSubmenu;
     menuBuilder.detailsSubmenu = detailsSubmenu;
 
-    if (menuBuilder.showMap && menuBuilder.menuIsOpen && !menuBuilder.mapMenuView.detachedWindowVisible) {
-        if (menuBuilder.mapMenuItem.menu && menuBuilder.mapMenuItem.menu != detailsSubmenu) {
-            [menuBuilder.mapMenuItem.menu removeItem:menuBuilder.mapMenuItem];
-        }
-        NSMenuItem *mapItem = [menuBuilder mapMenuItemIfNeeded];
-        if (mapItem) {
-            [detailsSubmenu addItem:mapItem];
-            [detailsSubmenu addItem:[NSMenuItem separatorItem]];
-        }
-    } else {
-        if (menuBuilder.mapMenuItem.menu) {
-            [menuBuilder.mapMenuItem.menu removeItem:menuBuilder.mapMenuItem];
-        }
-        if (!menuBuilder.mapMenuView.detachedWindowVisible) {
-            [menuBuilder tearDownMapMenuItem];
-        }
+    // The map is no longer embedded in the menu (WKWebView renders blank inside
+    // NSMenu on macOS 27.2); offer to open it in its own window instead.
+    if (menuBuilder.mapMenuItem.menu) {
+        [menuBuilder.mapMenuItem.menu removeItem:menuBuilder.mapMenuItem];
+    }
+    if (!menuBuilder.mapMenuView.detachedWindowVisible) {
+        [menuBuilder tearDownMapMenuItem];
+    }
+    if (menuBuilder.showMap) {
+        NSMenuItem *openMapItem = [[NSMenuItem alloc] initWithTitle:@"Open Map…"
+                                                             action:@selector(openMapWindow:)
+                                                      keyEquivalent:@""];
+        openMapItem.target = menuBuilder;
+        [detailsSubmenu addItem:openMapItem];
+        [detailsSubmenu addItem:[NSMenuItem separatorItem]];
     }
 
     NSString *captureValue = [menuBuilder captureStartDisplayValue];
